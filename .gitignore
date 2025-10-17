@@ -23,6 +23,9 @@ data/
 logs/
 *.log
 
+# Megadocs (auto-generated large documents)
+megadocs/
+
 # Python
 __pycache__/
 *.pyc
