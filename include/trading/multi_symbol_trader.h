@@ -53,8 +53,8 @@ struct TradingConfig {
     // Probability-based trading (from online_trader)
     bool enable_probability_scaling = true;   // Convert predictions to probabilities
     double probability_scaling_factor = 50.0; // Tanh scaling factor
-    double buy_threshold = 0.53;              // Probability threshold for entry
-    double sell_threshold = 0.47;             // Probability threshold for exit
+    double buy_threshold = 0.60;              // Probability threshold for entry (increased for selectivity)
+    double sell_threshold = 0.40;             // Probability threshold for exit (wider spread)
 
     // Bollinger Band amplification (from online_trader)
     bool enable_bb_amplification = true;      // Boost signals near BB bands
@@ -70,8 +70,8 @@ struct TradingConfig {
         horizon_config.lambda_10bar = 0.995; // Was 0.998 - faster adaptation
         horizon_config.min_confidence = 0.5;  // Was 0.6 - lower threshold
 
-        // Set reasonable defaults for trade filter (DISABLED for probability-based trading)
-        filter_config.min_bars_to_hold = 2;
+        // Set reasonable defaults for trade filter (SELECTIVE for probability-based trading)
+        filter_config.min_bars_to_hold = 10;  // Increased: predictions need time to realize
         filter_config.typical_hold_period = 20;
         filter_config.max_bars_to_hold = 60;
         filter_config.min_prediction_for_entry = 0.0;     // Disabled (use probability threshold)

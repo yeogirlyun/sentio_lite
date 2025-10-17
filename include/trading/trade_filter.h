@@ -53,7 +53,7 @@ public:
         double emergency_stop_loss_pct;    // -1% stop loss
 
         Config()
-            : min_bars_to_hold(5)                // Increase to hold longer
+            : min_bars_to_hold(10)               // Increased to 10 bars (predictions need time to realize)
             , typical_hold_period(20)
             , max_bars_to_hold(60)
             , min_bars_between_entries(5)        // Cooldown to prevent rapid churn
