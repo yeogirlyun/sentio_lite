@@ -30,6 +30,8 @@ struct Config {
 
     // Date for testing (mock mode)
     std::string test_date;  // YYYY-MM-DD format (single day or recent if empty)
+    std::string start_date; // YYYY-MM-DD format (for multi-day testing)
+    std::string end_date;   // YYYY-MM-DD format (for multi-day testing)
 
     // Warmup period
     int warmup_days = 3;     // Default 3 days
@@ -61,6 +63,8 @@ void print_usage(const char* program_name) {
               << "  --verbose            Show detailed progress\n\n"
               << "Mock Mode Options:\n"
               << "  --date YYYY-MM-DD    Test specific date (default: most recent)\n"
+              << "  --start-date DATE    Start date for multi-day testing (YYYY-MM-DD)\n"
+              << "  --end-date DATE      End date for multi-day testing (YYYY-MM-DD)\n"
               << "  --data-dir DIR       Data directory (default: data)\n"
               << "  --extension EXT      File extension: .bin or .csv (default: .bin)\n\n"
               << "Live Mode Options:\n"
@@ -141,6 +145,12 @@ bool parse_args(int argc, char* argv[], Config& config) {
         // Date option (mock mode)
         else if (arg == "--date" && i + 1 < argc) {
             config.test_date = argv[++i];
+        }
+        else if (arg == "--start-date" && i + 1 < argc) {
+            config.start_date = argv[++i];
+        }
+        else if (arg == "--end-date" && i + 1 < argc) {
+            config.end_date = argv[++i];
         }
         // Warmup
         else if (arg == "--warmup-days" && i + 1 < argc) {
@@ -244,6 +254,68 @@ std::string get_most_recent_date(const std::unordered_map<Symbol, std::vector<Ba
     char buffer[11];
     strftime(buffer, sizeof(buffer), "%Y-%m-%d", timeinfo);
     return std::string(buffer);
+}
+
+// Filter bars to date range (and warmup period before start)
+void filter_to_date_range(std::unordered_map<Symbol, std::vector<Bar>>& all_data,
+                         const std::string& start_date_str, const std::string& end_date_str,
+                         size_t warmup_bars, int bars_per_day, bool verbose = false) {
+    // Parse start date
+    int start_year, start_month, start_day;
+    sscanf(start_date_str.c_str(), "%d-%d-%d", &start_year, &start_month, &start_day);
+
+    struct tm start_timeinfo = {};
+    start_timeinfo.tm_year = start_year - 1900;
+    start_timeinfo.tm_mon = start_month - 1;
+    start_timeinfo.tm_mday = start_day;
+    start_timeinfo.tm_hour = 9;   // 9:30 AM ET (market open)
+    start_timeinfo.tm_min = 30;
+    start_timeinfo.tm_sec = 0;
+    start_timeinfo.tm_isdst = -1;
+
+    time_t start_time = mktime(&start_timeinfo);
+    Timestamp start_timestamp = std::chrono::system_clock::from_time_t(start_time);
+
+    // Parse end date
+    int end_year, end_month, end_day;
+    sscanf(end_date_str.c_str(), "%d-%d-%d", &end_year, &end_month, &end_day);
+
+    struct tm end_timeinfo = {};
+    end_timeinfo.tm_year = end_year - 1900;
+    end_timeinfo.tm_mon = end_month - 1;
+    end_timeinfo.tm_mday = end_day;
+    end_timeinfo.tm_hour = 16;  // 4 PM ET (market close)
+    end_timeinfo.tm_min = 0;
+    end_timeinfo.tm_sec = 0;
+    end_timeinfo.tm_isdst = -1;
+
+    time_t end_time = mktime(&end_timeinfo);
+    Timestamp end_timestamp = std::chrono::system_clock::from_time_t(end_time);
+
+    // Calculate warmup period before start
+    int warmup_days = (warmup_bars + bars_per_day - 1) / bars_per_day;
+    time_t warmup_start_time = start_time - ((warmup_days + 2) * 24 * 3600);
+    Timestamp warmup_start_timestamp = std::chrono::system_clock::from_time_t(warmup_start_time);
+
+    if (verbose) {
+        std::cout << "\n[DEBUG] Date range filtering:\n";
+        std::cout << "  Start date: " << start_date_str << "\n";
+        std::cout << "  End date: " << end_date_str << "\n";
+        std::cout << "  Warmup days: " << warmup_days << "\n";
+    }
+
+    // Filter each symbol to this date range (including warmup)
+    for (auto& [symbol, bars] : all_data) {
+        std::vector<Bar> filtered;
+
+        for (const auto& bar : bars) {
+            if (bar.timestamp >= warmup_start_timestamp && bar.timestamp <= end_timestamp) {
+                filtered.push_back(bar);
+            }
+        }
+
+        bars = std::move(filtered);
+    }
 }
 
 // Filter bars to specific date (and warmup period before it)
@@ -385,9 +457,14 @@ int run_mock_mode(Config& config) {
 
         std::cout << "Data loaded in " << load_duration << "ms\n";
 
-        // Determine test date
+        // Determine test date(s)
         std::string test_date = config.test_date;
-        if (test_date.empty()) {
+        bool is_multi_day = !config.start_date.empty() && !config.end_date.empty();
+
+        if (is_multi_day) {
+            std::cout << "Testing date range: " << config.start_date << " to " << config.end_date << "\n";
+            test_date = config.end_date;  // Use end date for filtering
+        } else if (test_date.empty()) {
             test_date = get_most_recent_date(all_data);
             std::cout << "Testing most recent date: " << test_date << "\n";
         } else {
@@ -441,9 +518,15 @@ int run_mock_mode(Config& config) {
             return 1;
         }
 
-        // Filter to test date using actual timestamps (not bar count!)
-        std::cout << "\nFiltering to test date (including warmup period)...\n";
-        filter_to_date(all_data, test_date, config.warmup_bars, config.trading.bars_per_day, config.verbose);
+        // Filter to test date(s) using actual timestamps (not bar count!)
+        if (is_multi_day) {
+            std::cout << "\nFiltering to date range (including warmup period)...\n";
+            filter_to_date_range(all_data, config.start_date, config.end_date,
+                               config.warmup_bars, config.trading.bars_per_day, config.verbose);
+        } else {
+            std::cout << "\nFiltering to test date (including warmup period)...\n";
+            filter_to_date(all_data, test_date, config.warmup_bars, config.trading.bars_per_day, config.verbose);
+        }
 
         // Show filtered bar counts
         for (const auto& [symbol, bars] : all_data) {
@@ -555,10 +638,13 @@ int run_mock_mode(Config& config) {
                 if (i < config.symbols.size() - 1) symbols_str += ",";
             }
 
+            std::string start_for_export = is_multi_day ? config.start_date : test_date;
+            std::string end_for_export = is_multi_day ? config.end_date : test_date;
+
             ResultsExporter::export_json(
                 results, trader, config.results_file,
                 symbols_str, "MOCK",
-                test_date, test_date
+                start_for_export, end_for_export
             );
             std::cout << "\n✅ Results exported to: " << config.results_file << "\n";
 
@@ -575,7 +661,11 @@ int run_mock_mode(Config& config) {
         std::cout << "\n";
 
         std::cout << "Test Summary:\n";
-        std::cout << "  Test Date:          " << test_date << "\n";
+        if (is_multi_day) {
+            std::cout << "  Test Period:        " << config.start_date << " to " << config.end_date << "\n";
+        } else {
+            std::cout << "  Test Date:          " << test_date << "\n";
+        }
         std::cout << "  Warmup:             " << (config.warmup_bars / config.trading.bars_per_day) << " days\n";
         std::cout << "  Trading Period:     " << ((min_bars - config.warmup_bars) / config.trading.bars_per_day) << " days\n";
         std::cout << "\n";
@@ -627,8 +717,14 @@ int run_mock_mode(Config& config) {
 
         // Generate dashboard if requested
         if (config.generate_dashboard) {
-            std::string start_date = config.test_date.empty() ? "" : config.test_date;
-            std::string end_date = config.test_date.empty() ? "" : config.test_date;
+            std::string start_date, end_date;
+            if (is_multi_day) {
+                start_date = config.start_date;
+                end_date = config.end_date;
+            } else {
+                start_date = config.test_date.empty() ? "" : config.test_date;
+                end_date = config.test_date.empty() ? "" : config.test_date;
+            }
 
             generate_dashboard(
                 config.results_file,
