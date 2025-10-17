@@ -63,7 +63,11 @@ public:
         file << "    \"max_positions\": " << trader.config().max_positions << ",\n";
         file << "    \"stop_loss_pct\": " << trader.config().stop_loss_pct << ",\n";
         file << "    \"profit_target_pct\": " << trader.config().profit_target_pct << ",\n";
-        file << "    \"lambda\": " << trader.config().lambda << ",\n";
+        file << "    \"lambda_1bar\": " << trader.config().horizon_config.lambda_1bar << ",\n";
+        file << "    \"lambda_5bar\": " << trader.config().horizon_config.lambda_5bar << ",\n";
+        file << "    \"lambda_10bar\": " << trader.config().horizon_config.lambda_10bar << ",\n";
+        file << "    \"min_prediction_for_entry\": " << trader.config().filter_config.min_prediction_for_entry << ",\n";
+        file << "    \"min_bars_to_hold\": " << trader.config().filter_config.min_bars_to_hold << ",\n";
         file << "    \"min_bars_to_learn\": " << trader.config().min_bars_to_learn << ",\n";
         file << "    \"bars_per_day\": " << trader.config().bars_per_day << "\n";
         file << "  }\n";

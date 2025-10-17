@@ -25,16 +25,11 @@ namespace trading {
  * - Production-ready stability (handles edge cases)
  */
 class FeatureExtractor {
-private:
-    CircularBuffer<Bar> history_;
-    static constexpr size_t LOOKBACK = 50;      // Increased from 20 for better features
+public:
+    // Public constants for feature dimensions
+    static constexpr size_t LOOKBACK = 50;      // Lookback window size
     static constexpr size_t NUM_FEATURES = 33;  // 8 time + 25 technical features
 
-    // Cached values for incremental calculation
-    double prev_close_;
-    size_t bar_count_;
-
-public:
     FeatureExtractor();
 
     /**
@@ -73,6 +68,11 @@ public:
     static std::vector<std::string> get_feature_names();
 
 private:
+    // Member variables
+    CircularBuffer<Bar> history_;
+    double prev_close_;
+    size_t bar_count_;
+
     // Time feature calculations (cyclical encoding)
     void calculate_time_features(Timestamp timestamp, Eigen::VectorXd& features, int& idx) const;
 

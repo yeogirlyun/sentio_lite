@@ -3,6 +3,7 @@
 #include "utils/data_loader.h"
 #include "utils/date_filter.h"
 #include "utils/results_exporter.h"
+#include "utils/config_reader.h"
 #include <iostream>
 #include <iomanip>
 #include <fstream>
@@ -39,6 +40,8 @@ struct Config {
     bool generate_dashboard = false;
     std::string dashboard_script = "generate_dashboard.py";
     std::string results_file = "results.json";
+    std::string trades_file = "trades.jsonl";
+    std::string dashboard_output = "trading_dashboard.html";
 
     // Trading parameters
     TradingConfig trading;
@@ -51,7 +54,6 @@ void print_usage(const char* program_name) {
               << "  live  - Real-time paper trading via Alpaca/Polygon\n\n"
               << "Usage: " << program_name << " <mock|live> [options]\n\n"
               << "Common Options:\n"
-              << "  --symbols LIST       Comma-separated symbols or 6|10|14 (default: 10)\n"
               << "  --warmup-days N      Warmup days before trading (default: 3)\n"
               << "  --capital AMOUNT     Initial capital (default: 100000)\n"
               << "  --max-positions N    Max concurrent positions (default: 3)\n"
@@ -72,49 +74,24 @@ void print_usage(const char* program_name) {
               << "  --results-file FILE  Results JSON file (default: results.json)\n"
               << "  --help               Show this help message\n\n"
               << "Examples:\n\n"
-              << "  # Mock mode - test most recent date with 10 symbols\n"
+              << "  # Mock mode - test most recent date\n"
               << "  " << program_name << " mock\n\n"
               << "  # Mock mode - test specific date\n"
               << "  " << program_name << " mock --date 2024-10-15\n\n"
-              << "  # Mock mode - test with custom symbols and generate dashboard\n"
-              << "  " << program_name << " mock --symbols TQQQ,SQQQ,SSO,SDS \\\n"
-              << "    --date 2024-10-15 --generate-dashboard\n\n"
-              << "  # Live mode - paper trade with 10 symbols\n"
+              << "  # Mock mode - test with dashboard generation\n"
+              << "  " << program_name << " mock --date 2024-10-15 --generate-dashboard\n\n"
+              << "  # Live mode - paper trading\n"
               << "  " << program_name << " live\n\n"
-              << "  # Live mode - paper trade with 6 symbols and 5-day warmup\n"
-              << "  " << program_name << " live --symbols 6 --warmup-days 5\n\n"
-              << "Default Symbol Lists:\n"
-              << "  6:  TQQQ, SQQQ, UPRO, SDS, UVXY, SVXY\n"
-              << "  10: TQQQ, SQQQ, SSO, SDS, TNA, TZA, FAS, FAZ, UVXY, SVXY (default)\n"
-              << "  14: + UPRO, SPXS, ERX, ERY, NUGT, DUST\n\n"
+              << "  # Live mode - with custom warmup period\n"
+              << "  " << program_name << " live --warmup-days 5\n\n"
+              << "Symbol Configuration:\n"
+              << "  Symbols are loaded from config/symbols.conf\n"
+              << "  Edit config/symbols.conf to change the symbol list\n\n"
               << "Key Insight:\n"
               << "  Mock and live modes share the EXACT same trading logic.\n"
               << "  Research and optimize in mock mode, then run live with confidence!\n";
 }
 
-bool parse_symbols(const std::string& symbols_str, std::vector<std::string>& symbols) {
-    // Check for default lists
-    if (symbols_str == "6") {
-        for (const auto& sym : symbols::DEFAULT_6) symbols.push_back(sym);
-        return true;
-    } else if (symbols_str == "10") {
-        for (const auto& sym : symbols::DEFAULT_10) symbols.push_back(sym);
-        return true;
-    } else if (symbols_str == "14") {
-        for (const auto& sym : symbols::DEFAULT_14) symbols.push_back(sym);
-        return true;
-    }
-
-    // Parse comma-separated list
-    std::istringstream iss(symbols_str);
-    std::string symbol;
-    while (std::getline(iss, symbol, ',')) {
-        if (!symbol.empty()) {
-            symbols.push_back(symbol);
-        }
-    }
-    return !symbols.empty();
-}
 
 bool parse_args(int argc, char* argv[], Config& config) {
     if (argc < 2) {
@@ -135,8 +112,14 @@ bool parse_args(int argc, char* argv[], Config& config) {
     config.mode_str = mode_arg;
     config.mode = parse_trading_mode(mode_arg);
 
-    // Default symbols to 10
-    parse_symbols("10", config.symbols);
+    // Load symbols from config file
+    try {
+        config.symbols = utils::ConfigReader::load_symbols("config/symbols.conf");
+    } catch (const std::exception& e) {
+        std::cerr << "Error loading symbols from config: " << e.what() << "\n";
+        std::cerr << "Please ensure config/symbols.conf exists and contains valid symbols.\n";
+        return false;
+    }
 
     // Parse remaining options
     for (int i = 2; i < argc; ++i) {
@@ -153,14 +136,6 @@ bool parse_args(int argc, char* argv[], Config& config) {
             config.extension = argv[++i];
             if (config.extension[0] != '.') {
                 config.extension = "." + config.extension;
-            }
-        }
-        // Symbol options
-        else if (arg == "--symbols" && i + 1 < argc) {
-            config.symbols.clear();
-            if (!parse_symbols(argv[++i], config.symbols)) {
-                std::cerr << "Error: Invalid symbols specification\n";
-                return false;
             }
         }
         // Date option (mock mode)
@@ -189,10 +164,14 @@ bool parse_args(int argc, char* argv[], Config& config) {
             config.trading.profit_target_pct = std::stod(argv[++i]);
         }
         else if (arg == "--lambda" && i + 1 < argc) {
-            config.trading.lambda = std::stod(argv[++i]);
+            // Set all lambda values to the same (can be customized further if needed)
+            double lambda = std::stod(argv[++i]);
+            config.trading.horizon_config.lambda_1bar = lambda;
+            config.trading.horizon_config.lambda_5bar = lambda;
+            config.trading.horizon_config.lambda_10bar = lambda;
         }
         else if (arg == "--min-threshold" && i + 1 < argc) {
-            config.trading.min_prediction_threshold = std::stod(argv[++i]);
+            config.trading.filter_config.min_prediction_for_entry = std::stod(argv[++i]);
         }
         // Output options
         else if (arg == "--generate-dashboard") {
@@ -216,18 +195,37 @@ bool parse_args(int argc, char* argv[], Config& config) {
     return true;
 }
 
-void generate_dashboard(const std::string& results_file, const std::string& script_path) {
+void generate_dashboard(const std::string& results_file, const std::string& script_path,
+                        const std::string& trades_file, const std::string& output_file,
+                        const std::string& data_dir, double initial_capital,
+                        const std::string& start_date, const std::string& end_date) {
     std::cout << "\nGenerating dashboard...\n";
 
-    // Call dashboard script - it will auto-generate timestamped filename
-    std::string command = "python3 " + script_path + " " + results_file;
+    // Build command with all required arguments
+    std::ostringstream cmd;
+    cmd << "python3 " << script_path
+        << " --trades " << trades_file
+        << " --output " << output_file
+        << " --start-equity " << std::fixed << std::setprecision(0) << initial_capital
+        << " --data-dir " << data_dir
+        << " --results " << results_file;
+
+    if (!start_date.empty()) {
+        cmd << " --start-date " << start_date;
+    }
+    if (!end_date.empty()) {
+        cmd << " --end-date " << end_date;
+    }
+
+    std::string command = cmd.str();
     int ret = system(command.c_str());
 
     if (ret != 0) {
         std::cerr << "⚠️  Dashboard generation failed (code: " << ret << ")\n";
         std::cerr << "   Command: " << command << "\n";
+    } else {
+        std::cout << "✅ Dashboard generated: " << output_file << "\n";
     }
-    // Success message is printed by the Python script
 }
 
 std::string get_most_recent_date(const std::unordered_map<Symbol, std::vector<Bar>>& all_data) {
@@ -478,13 +476,20 @@ int run_mock_mode(Config& config) {
                   << (config.warmup_bars / config.trading.bars_per_day) << " days)\n";
         std::cout << "  Trading: " << (min_bars - config.warmup_bars) << " bars (~"
                   << ((min_bars - config.warmup_bars) / config.trading.bars_per_day) << " days)\n";
-        std::cout << "  Features: 25 technical indicators\n";
-        std::cout << "  Predictor: EWRLS (Online Learning, λ=" << config.trading.lambda << ")\n";
+        std::cout << "  Features: 33 features (8 time + 25 technical)\n";
+        std::cout << "  Predictor: Multi-Horizon EWRLS (1/5/10 bars, λ="
+                  << config.trading.horizon_config.lambda_1bar << "/"
+                  << config.trading.horizon_config.lambda_5bar << "/"
+                  << config.trading.horizon_config.lambda_10bar << ")\n";
         std::cout << "  Strategy: Multi-symbol rotation (top " << config.trading.max_positions << ")\n";
-        std::cout << "  Min prediction threshold: " << config.trading.min_prediction_threshold << "\n\n";
+        std::cout << "  Min prediction threshold: " << config.trading.filter_config.min_prediction_for_entry << "\n";
+        std::cout << "  Min holding period: " << config.trading.filter_config.min_bars_to_hold << " bars\n\n";
 
         // Adjust min_bars_to_learn based on warmup
-        config.trading.min_bars_to_learn = config.warmup_bars;
+        // CRITICAL FIX: Add 1 to skip overnight gap between last warmup bar and first test day bar
+        // This ensures we trade the FULL test day (all 391 bars) instead of including the last bar of warmup day
+        // Example: warmup_bars=1173 means bars 0-1172 (3 days), test day starts at bar 1173+1=1174
+        config.trading.min_bars_to_learn = config.warmup_bars + 1;
 
         // Initialize trader
         MultiSymbolTrader trader(config.symbols, config.trading);
@@ -535,7 +540,7 @@ int run_mock_mode(Config& config) {
             std::cout << "  - Warmup bars: " << config.warmup_bars << "\n";
             std::cout << "  - Total bars processed: " << min_bars << "\n";
             std::cout << "  - Trading bars: " << (min_bars - config.warmup_bars) << "\n";
-            std::cout << "  - Min prediction threshold: " << config.trading.min_prediction_threshold << "\n";
+            std::cout << "  - Min prediction threshold: " << config.trading.filter_config.min_prediction_for_entry << "\n";
             std::cout << "\n  Possible causes:\n";
             std::cout << "  1. Prediction threshold too high (try --min-threshold 0.0001)\n";
             std::cout << "  2. Insufficient trading period after warmup\n";
@@ -622,7 +627,19 @@ int run_mock_mode(Config& config) {
 
         // Generate dashboard if requested
         if (config.generate_dashboard) {
-            generate_dashboard(config.results_file, config.dashboard_script);
+            std::string start_date = config.test_date.empty() ? "" : config.test_date;
+            std::string end_date = config.test_date.empty() ? "" : config.test_date;
+
+            generate_dashboard(
+                config.results_file,
+                config.dashboard_script,
+                config.trades_file,
+                config.dashboard_output,
+                config.data_dir,
+                config.capital,
+                start_date,
+                end_date
+            );
         }
 
         return 0;

@@ -33,7 +33,7 @@ def load_config(config_path='config/rotation_strategy.json'):
             return config.get('symbols', {}).get('active', [])
     except:
         return ['ERX', 'ERY', 'FAS', 'FAZ', 'SDS', 'SSO', 'SQQQ', 'SVIX',
-                'TNA', 'TQQQ', 'TZA', 'UVXY', 'AAPL', 'MSFT', 'AMZN',
+                'TNA', 'TQQQ', 'TZA', 'UVXY', 'SOXL', 'SOXS', 'AAPL', 'MSFT', 'AMZN',
                 'TSLA', 'NVDA', 'META', 'BRK.B', 'GOOGL']
 
 def load_trades(trades_path):
@@ -132,7 +132,8 @@ def load_price_data(symbol, data_dir='data/equities'):
     return df
 
 def generate_html_dashboard(trades_path, output_path, config_path='config/rotation_strategy.json',
-                            data_dir='data/equities', start_equity=100000.0, start_date=None, end_date=None):
+                            data_dir='data/equities', start_equity=100000.0, start_date=None, end_date=None,
+                            results_path=None):
     """Generate HTML dashboard with Plotly charts and HTML tables"""
 
     print(f"\n{'='*60}")
@@ -142,6 +143,17 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
     # Load configuration
     symbols = load_config(config_path)
     print(f"✓ Loaded {len(symbols)} symbols from config")
+
+    # Load trading config from results.json if provided
+    trading_config = {}
+    if results_path and Path(results_path).exists():
+        try:
+            with open(results_path, 'r') as f:
+                results_data = json.load(f)
+                trading_config = results_data.get('config', {})
+                print(f"✓ Loaded trading config from results")
+        except Exception as e:
+            print(f"⚠️  Could not load config from results: {e}")
 
     # Load trades
     print(f"\n📊 Loading trades from: {trades_path}")
@@ -404,6 +416,39 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
             color: #999;
             font-size: 1.2em;
         }}
+
+        .config-section {{
+            background: white;
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 30px;
+        }}
+
+        .config-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }}
+
+        .config-item {{
+            display: flex;
+            justify-content: space-between;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 5px;
+        }}
+
+        .config-label {{
+            font-weight: 600;
+            color: #495057;
+        }}
+
+        .config-value {{
+            color: #667eea;
+            font-weight: 500;
+        }}
     </style>
 </head>
 <body>
@@ -438,7 +483,59 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
             <div class="value">{total_trades}</div>
         </div>
     </div>
+"""
 
+    # Add configuration section if available
+    if trading_config:
+        html += f"""
+    <div class="config-section">
+        <h2 style="color: #667eea; margin-bottom: 20px;">⚙️ Trading Configuration</h2>
+        <div class="config-grid">
+            <div class="config-item">
+                <span class="config-label">Max Positions:</span>
+                <span class="config-value">{trading_config.get('max_positions', 'N/A')}</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Min Holding Period:</span>
+                <span class="config-value">{trading_config.get('min_bars_to_hold', 'N/A')} bars</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Stop Loss:</span>
+                <span class="config-value">{trading_config.get('stop_loss_pct', 0) * 100:.2f}%</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Profit Target:</span>
+                <span class="config-value">{trading_config.get('profit_target_pct', 0) * 100:.2f}%</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Lambda (1-bar):</span>
+                <span class="config-value">{trading_config.get('lambda_1bar', 'N/A')}</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Lambda (5-bar):</span>
+                <span class="config-value">{trading_config.get('lambda_5bar', 'N/A')}</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Lambda (10-bar):</span>
+                <span class="config-value">{trading_config.get('lambda_10bar', 'N/A')}</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Min Prediction for Entry:</span>
+                <span class="config-value">{trading_config.get('min_prediction_for_entry', 0) * 100:.2f}%</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Min Bars to Learn:</span>
+                <span class="config-value">{trading_config.get('min_bars_to_learn', 'N/A')}</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Bars per Day:</span>
+                <span class="config-value">{trading_config.get('bars_per_day', 'N/A')}</span>
+            </div>
+        </div>
+    </div>
+"""
+
+    html += """
     <div class="container" style="margin-top: 30px;">
         <h2 style="color: #667eea; margin-bottom: 20px;">📈 Per-Symbol Performance Summary</h2>
         <div class="table-container">
@@ -729,6 +826,7 @@ def main():
     parser.add_argument('--start-equity', type=float, default=100000.0, help='Starting equity')
     parser.add_argument('--start-date', default=None, help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end-date', default=None, help='End date (YYYY-MM-DD)')
+    parser.add_argument('--results', default=None, help='Path to results.json (for config)')
 
     args = parser.parse_args()
 
@@ -739,7 +837,8 @@ def main():
         args.data_dir,
         args.start_equity,
         args.start_date,
-        args.end_date
+        args.end_date,
+        args.results
     )
 
 if __name__ == '__main__':
