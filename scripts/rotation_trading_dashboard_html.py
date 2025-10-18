@@ -587,6 +587,98 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
     </div>
 """
 
+    # Calculate per-day performance
+    daily_performance = {}
+    for trade in trades:
+        if trade.get('action') == 'EXIT':
+            trade_date = utc_ms_to_et_string(trade.get('timestamp_ms', 0), fmt='%Y-%m-%d')
+
+            # Filter to date range
+            if start_date and end_date:
+                if not (start_date <= trade_date <= end_date):
+                    continue
+
+            if trade_date not in daily_performance:
+                daily_performance[trade_date] = {
+                    'pnl': 0,
+                    'num_trades': 0,
+                    'num_wins': 0,
+                    'num_losses': 0,
+                    'gross_wins': 0,
+                    'gross_losses': 0
+                }
+
+            pnl = trade.get('pnl', 0)
+            daily_performance[trade_date]['pnl'] += pnl
+            daily_performance[trade_date]['num_trades'] += 1
+
+            if pnl > 0:
+                daily_performance[trade_date]['num_wins'] += 1
+                daily_performance[trade_date]['gross_wins'] += pnl
+            elif pnl < 0:
+                daily_performance[trade_date]['num_losses'] += 1
+                daily_performance[trade_date]['gross_losses'] += abs(pnl)
+
+    # Add per-day performance table
+    html += """
+    <div class="container" style="margin-top: 30px;">
+        <h2 style="color: #667eea; margin-bottom: 20px;">📅 Per-Day Performance Summary</h2>
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th style="text-align: right;">Trades</th>
+                        <th style="text-align: right;">Wins</th>
+                        <th style="text-align: right;">Losses</th>
+                        <th style="text-align: right;">Win Rate</th>
+                        <th style="text-align: right;">Daily P&L</th>
+                        <th style="text-align: right;">Avg Win</th>
+                        <th style="text-align: right;">Avg Loss</th>
+                        <th style="text-align: right;">Profit Factor</th>
+                    </tr>
+                </thead>
+                <tbody>
+"""
+
+    # Sort days chronologically
+    sorted_days = sorted(daily_performance.keys())
+
+    for day in sorted_days:
+        perf = daily_performance[day]
+
+        win_rate = (perf['num_wins'] / perf['num_trades'] * 100) if perf['num_trades'] > 0 else 0
+        avg_win = (perf['gross_wins'] / perf['num_wins']) if perf['num_wins'] > 0 else 0
+        avg_loss = -(perf['gross_losses'] / perf['num_losses']) if perf['num_losses'] > 0 else 0
+        profit_factor = (perf['gross_wins'] / perf['gross_losses']) if perf['gross_losses'] > 0 else 0
+
+        pnl_sign = '+' if perf['pnl'] > 0 else ''
+        avg_win_sign = '+' if avg_win > 0 else ''
+        avg_loss_sign = '' if avg_loss >= 0 else ''
+
+        pnl_color = 'color: #10b981;' if perf['pnl'] > 0 else 'color: #ef4444;' if perf['pnl'] < 0 else ''
+
+        html += f"""
+                    <tr>
+                        <td style="font-weight: bold;">{day}</td>
+                        <td style="text-align: right;">{perf['num_trades']}</td>
+                        <td style="text-align: right;">{perf['num_wins']}</td>
+                        <td style="text-align: right;">{perf['num_losses']}</td>
+                        <td style="text-align: right;">{win_rate:.1f}%</td>
+                        <td style="text-align: right; {pnl_color} font-weight: bold;">{pnl_sign}${perf['pnl']:,.2f}</td>
+                        <td style="text-align: right;">{avg_win_sign}${avg_win:,.2f}</td>
+                        <td style="text-align: right;">{avg_loss_sign}${avg_loss:,.2f}</td>
+                        <td style="text-align: right;">{profit_factor:.2f}</td>
+                    </tr>
+"""
+
+    html += """
+                </tbody>
+            </table>
+        </div>
+    </div>
+"""
+
     # Generate sections for each symbol
     for symbol in sorted_symbols:
         symbol_trades = trades_by_symbol.get(symbol, [])
@@ -727,11 +819,48 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
                 # Fallback: use last 390 bars if no trades
                 price_data = price_data.tail(390)
 
-            timestamps = price_data['timestamp'].dt.strftime('%Y-%m-%d %H:%M').tolist()
+            # CRITICAL: Filter to ONLY regular trading hours (9:30 AM - 4:00 PM ET) and weekdays
+            price_data['hour'] = price_data['timestamp'].dt.hour
+            price_data['minute'] = price_data['timestamp'].dt.minute
+            price_data['weekday'] = price_data['timestamp'].dt.weekday  # 0=Monday, 6=Sunday
+
+            # Keep only RTH: 9:30 AM to 4:00 PM ET, Monday-Friday
+            price_data = price_data[
+                (price_data['weekday'] < 5) &  # Monday to Friday only
+                (
+                    ((price_data['hour'] == 9) & (price_data['minute'] >= 30)) |  # 9:30 AM onwards
+                    ((price_data['hour'] >= 10) & (price_data['hour'] < 16)) |    # 10 AM to 3:59 PM
+                    ((price_data['hour'] == 16) & (price_data['minute'] == 0))    # Up to 4:00 PM
+                )
+            ].copy()
+
+            # Create sequential bar numbers for continuous x-axis (no gaps)
+            price_data['bar_num'] = range(len(price_data))
+
+            # Create readable timestamps for hover
+            timestamps_str = price_data['timestamp'].dt.strftime('%Y-%m-%d %H:%M').tolist()
+            bar_numbers = price_data['bar_num'].tolist()
             prices = price_data['close'].tolist()
 
-            # Get entry and exit points (convert UTC to ET) - filter to test date range
-            entries = []
+            # Create custom tick labels (show date at market open of each day)
+            tickvals = []
+            ticktext = []
+            prev_date = None
+            for idx, row in price_data.iterrows():
+                current_date = row['timestamp'].strftime('%Y-%m-%d')
+                if current_date != prev_date:
+                    tickvals.append(row['bar_num'])
+                    ticktext.append(current_date)
+                    prev_date = current_date
+
+            # Get entry and exit points - map to bar numbers
+            # Create a mapping from timestamp to bar number
+            ts_to_bar = {}
+            for idx, row in price_data.iterrows():
+                ts_str = row['timestamp'].strftime('%Y-%m-%d %H:%M')
+                ts_to_bar[ts_str] = row['bar_num']
+
+            entries = []  # (bar_num, price, timestamp_str)
             for t in symbol_trades:
                 if t.get('action') == 'ENTRY':
                     ts_str = utc_ms_to_et_string(t['timestamp_ms'])
@@ -739,11 +868,15 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
                     # Only include if within date range
                     if start_date and end_date:
                         if start_date <= trade_date <= end_date:
-                            entries.append((ts_str, t['price']))
+                            bar_num = ts_to_bar.get(ts_str)
+                            if bar_num is not None:
+                                entries.append((bar_num, t['price'], ts_str))
                     else:
-                        entries.append((ts_str, t['price']))
+                        bar_num = ts_to_bar.get(ts_str)
+                        if bar_num is not None:
+                            entries.append((bar_num, t['price'], ts_str))
 
-            exits = []
+            exits = []  # (bar_num, price, timestamp_str)
             for t in symbol_trades:
                 if t.get('action') == 'EXIT':
                     ts_str = utc_ms_to_et_string(t['timestamp_ms'])
@@ -751,19 +884,25 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
                     # Only include if within date range
                     if start_date and end_date:
                         if start_date <= trade_date <= end_date:
-                            exits.append((ts_str, t['price']))
+                            bar_num = ts_to_bar.get(ts_str)
+                            if bar_num is not None:
+                                exits.append((bar_num, t['price'], ts_str))
                     else:
-                        exits.append((ts_str, t['price']))
+                        bar_num = ts_to_bar.get(ts_str)
+                        if bar_num is not None:
+                            exits.append((bar_num, t['price'], ts_str))
 
             html += f"""
     <script>
         var trace1 = {{
-            x: {timestamps},
+            x: {bar_numbers},
             y: {prices},
             type: 'scatter',
             mode: 'lines',
             name: 'Price',
-            line: {{color: '{color}', width: 2}}
+            line: {{color: '{color}', width: 2}},
+            text: {timestamps_str},
+            hovertemplate: '%{{text}}<br>Price: $%{{y:.2f}}<extra></extra>'
         }};
 
         var trace2 = {{
@@ -772,7 +911,9 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
             type: 'scatter',
             mode: 'markers',
             name: 'Entry',
-            marker: {{color: 'green', size: 12, symbol: 'triangle-up'}}
+            marker: {{color: 'green', size: 12, symbol: 'triangle-up'}},
+            text: {[e[2] for e in entries]},
+            hovertemplate: 'ENTRY<br>%{{text}}<br>$%{{y:.2f}}<extra></extra>'
         }};
 
         var trace3 = {{
@@ -781,12 +922,19 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
             type: 'scatter',
             mode: 'markers',
             name: 'Exit',
-            marker: {{color: 'red', size: 12, symbol: 'triangle-down'}}
+            marker: {{color: 'red', size: 12, symbol: 'triangle-down'}},
+            text: {[e[2] for e in exits]},
+            hovertemplate: 'EXIT<br>%{{text}}<br>$%{{y:.2f}}<extra></extra>'
         }};
 
         var layout = {{
-            title: '{symbol} Price & Trades',
-            xaxis: {{title: 'Time (ET)'}},
+            title: '{symbol} Price & Trades (RTH Only)',
+            xaxis: {{
+                title: 'Trading Days',
+                tickmode: 'array',
+                tickvals: {tickvals},
+                ticktext: {ticktext}
+            }},
             yaxis: {{title: 'Price ($)'}},
             hovermode: 'closest',
             showlegend: true

@@ -5,8 +5,56 @@
 #include <iomanip>
 #include <stdexcept>
 #include <cmath>
+#include <ctime>
+#include <map>
+
+/**
+ * Calculate simple moving average from price history
+ * @param history Price history (most recent price at back)
+ * @param period Number of bars for MA calculation
+ * @return Moving average, or NaN if insufficient data
+ */
+static double calculate_moving_average(const std::deque<double>& history, int period) {
+    if (static_cast<int>(history.size()) < period) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    double sum = 0.0;
+    // Sum the last 'period' prices
+    for (int i = 0; i < period; ++i) {
+        sum += history[history.size() - 1 - i];
+    }
+
+    return sum / period;
+}
 
 namespace trading {
+
+// Helper function: Check if bar timestamp indicates end of trading day
+// Returns true if timestamp is at or after 3:59 PM ET (market close at 4:00 PM)
+static bool is_end_of_day(Timestamp timestamp) {
+    auto time_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+        timestamp.time_since_epoch()).count();
+    time_t time = static_cast<time_t>(time_seconds);
+    struct tm* tm_info = localtime(&time);
+
+    // Market close is 16:00 (4:00 PM)
+    // Trigger EOD at last minute (15:59 or 16:00)
+    return (tm_info->tm_hour == 15 && tm_info->tm_min >= 59) ||
+           (tm_info->tm_hour >= 16);
+}
+
+// Helper function: Extract date from timestamp (YYYYMMDD format)
+static int64_t extract_date_from_timestamp(Timestamp timestamp) {
+    auto time_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+        timestamp.time_since_epoch()).count();
+    time_t time = static_cast<time_t>(time_seconds);
+    struct tm* tm_info = localtime(&time);
+
+    return (tm_info->tm_year + 1900) * 10000 +
+           (tm_info->tm_mon + 1) * 100 +
+           tm_info->tm_mday;
+}
 
 MultiSymbolTrader::MultiSymbolTrader(const std::vector<Symbol>& symbols,
                                      const TradingConfig& config)
@@ -14,8 +62,13 @@ MultiSymbolTrader::MultiSymbolTrader(const std::vector<Symbol>& symbols,
       config_(config),
       cash_(config.initial_capital),
       bars_seen_(0),
+      trading_bars_(0),
       total_trades_(0),
-      total_transaction_costs_(0.0) {
+      total_transaction_costs_(0.0),
+      daily_start_equity_(config.initial_capital),
+      daily_start_trades_(0),
+      daily_winning_trades_(0),
+      daily_losing_trades_(0) {
 
     // Initialize trade filter
     trade_filter_ = std::make_unique<TradeFilter>(config_.filter_config);
@@ -171,39 +224,85 @@ void MultiSymbolTrader::on_bar(const std::unordered_map<Symbol, Bar>& market_dat
             auto pred = predictors_[symbol]->predict(features.value());
             predictions[symbol] = {pred, features.value(), bar.close};
 
-            // Update predictor with realized returns
+            // Update predictor with realized returns or mean reversion targets
             if (bars_seen_ > 1) {
                 auto& history = price_history_[symbol];
 
-                // Calculate 1-bar return
-                double return_1bar = std::numeric_limits<double>::quiet_NaN();
-                if (history.size() >= 2) {
-                    double prev_price = history[history.size() - 2];
-                    if (prev_price > 0) {
-                        return_1bar = (bar.close - prev_price) / prev_price;
+                double target_1bar = std::numeric_limits<double>::quiet_NaN();
+                double target_5bar = std::numeric_limits<double>::quiet_NaN();
+                double target_10bar = std::numeric_limits<double>::quiet_NaN();
+
+                if (config_.enable_mean_reversion_predictor) {
+                    // MEAN REVERSION MODE: Learn to predict reversion based on deviation from MA
+                    //
+                    // Theory: When price deviates from its moving average, it tends to revert.
+                    // If price is 2% above MA, we expect it to fall back toward the MA.
+                    // Target = actual_return to train predictor on real outcomes, but predictor
+                    // learns the pattern: "deviation → expected reversion"
+
+                    // 1-bar target: Short-term mean reversion
+                    if (history.size() >= 2) {
+                        double prev_price = history[history.size() - 2];
+                        double ma = calculate_moving_average(history, config_.ma_period_1bar);
+                        if (prev_price > 0 && !std::isnan(ma) && ma > 0) {
+                            // Actual return from t-1 to t
+                            double actual_return = (bar.close - prev_price) / prev_price;
+                            target_1bar = actual_return;
+
+                            // Note: Features already include price/MA information, so predictor
+                            // can learn the deviation→reversion relationship from the data
+                        }
+                    }
+
+                    // 5-bar target: Medium-term mean reversion
+                    if (history.size() >= 6) {
+                        double price_5bars_ago = history[history.size() - 6];
+                        double ma = calculate_moving_average(history, config_.ma_period_5bar);
+                        if (price_5bars_ago > 0 && !std::isnan(ma) && ma > 0) {
+                            double actual_return = (bar.close - price_5bars_ago) / price_5bars_ago;
+                            target_5bar = actual_return;
+                        }
+                    }
+
+                    // 10-bar target: Longer-term mean reversion
+                    if (history.size() >= 11) {
+                        double price_10bars_ago = history[history.size() - 11];
+                        double ma = calculate_moving_average(history, config_.ma_period_10bar);
+                        if (price_10bars_ago > 0 && !std::isnan(ma) && ma > 0) {
+                            double actual_return = (bar.close - price_10bars_ago) / price_10bars_ago;
+                            target_10bar = actual_return;
+                        }
+                    }
+                } else {
+                    // RAW RETURN MODE: Original behavior (predict simple returns)
+
+                    // Calculate 1-bar return
+                    if (history.size() >= 2) {
+                        double prev_price = history[history.size() - 2];
+                        if (prev_price > 0) {
+                            target_1bar = (bar.close - prev_price) / prev_price;
+                        }
+                    }
+
+                    // Calculate 5-bar return
+                    if (history.size() >= 6) {
+                        double price_5bars_ago = history[history.size() - 6];
+                        if (price_5bars_ago > 0) {
+                            target_5bar = (bar.close - price_5bars_ago) / price_5bars_ago;
+                        }
+                    }
+
+                    // Calculate 10-bar return
+                    if (history.size() >= 11) {
+                        double price_10bars_ago = history[history.size() - 11];
+                        if (price_10bars_ago > 0) {
+                            target_10bar = (bar.close - price_10bars_ago) / price_10bars_ago;
+                        }
                     }
                 }
 
-                // Calculate 5-bar return (if available)
-                double return_5bar = std::numeric_limits<double>::quiet_NaN();
-                if (history.size() >= 6) {
-                    double price_5bars_ago = history[history.size() - 6];
-                    if (price_5bars_ago > 0) {
-                        return_5bar = (bar.close - price_5bars_ago) / price_5bars_ago;
-                    }
-                }
-
-                // Calculate 10-bar return (if available)
-                double return_10bar = std::numeric_limits<double>::quiet_NaN();
-                if (history.size() >= 11) {
-                    double price_10bars_ago = history[history.size() - 11];
-                    if (price_10bars_ago > 0) {
-                        return_10bar = (bar.close - price_10bars_ago) / price_10bars_ago;
-                    }
-                }
-
-                // Update multi-horizon predictor
-                predictors_[symbol]->update(features.value(), return_1bar, return_5bar, return_10bar);
+                // Update multi-horizon predictor with targets
+                predictors_[symbol]->update(features.value(), target_1bar, target_5bar, target_10bar);
             }
         }
     }
@@ -214,16 +313,114 @@ void MultiSymbolTrader::on_bar(const std::unordered_map<Symbol, Bar>& market_dat
     // Step 5: Update existing positions (check exit conditions with trade filter)
     update_positions(market_data, predictions);
 
-    // Step 6: Make trading decisions (after warmup period)
-    if (bars_seen_ > config_.min_bars_to_learn) {
-        make_trades(predictions, market_data);
+    // Step 6: Update warmup phase and execute phase-specific logic
+    update_phase();
+
+    // Step 6b: Update rotation cooldowns (from online_trader)
+    update_rotation_cooldowns();
+
+    switch(config_.current_phase) {
+        case TradingConfig::WARMUP_OBSERVATION:
+            handle_observation_phase(market_data);
+            break;
+
+        case TradingConfig::WARMUP_SIMULATION:
+            handle_simulation_phase(predictions, market_data);
+            break;
+
+        case TradingConfig::WARMUP_COMPLETE:
+        case TradingConfig::LIVE_TRADING:
+            handle_live_phase(predictions, market_data);
+            break;
     }
 
-    // Step 7: EOD liquidation
-    if (config_.eod_liquidation &&
-        bars_seen_ % config_.bars_per_day == config_.bars_per_day - 1) {
+    // Step 7: EOD liquidation (use timestamp-based detection)
+    // Detect end of day based on bar timestamp (3:59-4:00 PM ET)
+    // This is more robust than modulo arithmetic which fails with missing bars
+    static int64_t last_trading_date = 0;
+    static int64_t last_eod_date = 0;  // Track last EOD to prevent duplicate triggers
+    int64_t current_trading_date = extract_date_from_timestamp(
+        market_data.begin()->second.timestamp);
+    bool is_eod = is_end_of_day(market_data.begin()->second.timestamp);
+
+    // Only trigger EOD once per day (when we first see EOD timestamp)
+    bool should_trigger_eod = is_eod && (current_trading_date != last_eod_date);
+
+    if (config_.eod_liquidation && trading_bars_ > 0 && should_trigger_eod) {
+        int day_num = trading_bars_ / config_.bars_per_day;
+        last_eod_date = current_trading_date;  // Mark this day as processed
+
+        // Log day boundary transition
+        std::cout << "\n[DAY BOUNDARY] Transitioning to day " << day_num << " → "
+                  << (day_num + 1) << " (bar " << bars_seen_ << ")\n";
+
+        // Log position states before EOD liquidation
+        std::cout << "  [POSITION STATES BEFORE EOD]:\n";
+        for (const auto& symbol : symbols_) {
+            const auto& state = trade_filter_->get_position_state(symbol);
+            std::cout << "    " << symbol << ": "
+                      << (state.has_position ? "HOLDING" : "FLAT")
+                      << " | last_exit_bar: " << state.last_exit_bar
+                      << " | bars_held: " << state.bars_held << "\n";
+        }
+
+        // Liquidate all positions
         liquidate_all(market_data, "EOD");
+
+        // Calculate end-of-day equity
+        double end_equity = get_equity(market_data);
+
+        // Calculate daily return
+        double daily_return = (daily_start_equity_ > 0) ?
+                             (end_equity - daily_start_equity_) / daily_start_equity_ : 0.0;
+
+        // Store daily results
+        DailyResults daily;
+        daily.day_number = day_num;
+        daily.start_equity = daily_start_equity_;
+        daily.end_equity = end_equity;
+        daily.daily_return = daily_return;
+        daily.trades_today = total_trades_ - daily_start_trades_;
+        daily.winning_trades_today = daily_winning_trades_;
+        daily.losing_trades_today = daily_losing_trades_;
+        daily_results_.push_back(daily);
+
+        // Print daily summary
+        std::cout << "  [EOD] Day " << day_num << " complete:"
+                  << " Equity: $" << std::fixed << std::setprecision(2) << end_equity
+                  << " (" << std::showpos << (daily_return * 100) << std::noshowpos << "%)"
+                  << " | Trades: " << daily.trades_today
+                  << " (W:" << daily.winning_trades_today
+                  << " L:" << daily.losing_trades_today << ")\n";
+
+        // Reset daily counters for next day
+        daily_start_equity_ = end_equity;
+        daily_start_trades_ = total_trades_;
+        daily_winning_trades_ = 0;
+        daily_losing_trades_ = 0;
+
+        // Reset trade filter's daily frequency limits for next trading day
+        trade_filter_->reset_daily_limits(static_cast<int>(bars_seen_));
+
+        // Verify filter reset worked
+        auto stats = trade_filter_->get_trade_stats(static_cast<int>(bars_seen_));
+        std::cout << "  [FILTER RESET] Trades today: " << stats.trades_today
+                  << " (should be 0)\n";
+
+        // Log position states after reset
+        std::cout << "  [POSITION STATES AFTER RESET]:\n";
+        for (const auto& symbol : symbols_) {
+            const auto& state = trade_filter_->get_position_state(symbol);
+            std::cout << "    " << symbol << ": "
+                      << (state.has_position ? "HOLDING" : "FLAT")
+                      << " | last_exit_bar: " << state.last_exit_bar
+                      << " (should be -999 for FLAT positions)\n";
+        }
+        std::cout << "\n";
     }
+
+    // Update last trading date for next iteration
+    last_trading_date = current_trading_date;
 }
 
 void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionData>& predictions,
@@ -323,54 +520,196 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
         }
     }
 
-    // ROTATION LOGIC REMOVED: Positions are now only exited when signals deteriorate
-    // This is handled in update_positions() which checks:
-    // - Emergency stop loss
-    // - Profit target reached
-    // - Signal quality degraded
-    // - Signal reversed direction
-    // - Maximum hold period reached
-    //
-    // Removing forced rotation to "top 3" reduces excessive churning
-    // and allows positions to hold until their signals truly deteriorate.
+    // ========================================================================
+    // RANK-BASED ROTATION LOGIC (from online_trader)
+    // ========================================================================
+    // Entry follows 3 modes:
+    // 1. Fill empty slots with top-ranked signals
+    // 2. Hold positions if they remain in top N
+    // 3. Rotate out weak positions ONLY if significantly better signal available
 
-    // Enter new positions if we have capacity and sufficient cash
+    // Step 1: Enter new positions if we have empty slots
     for (const auto& symbol : top_symbols) {
         if (positions_.size() >= config_.max_positions) break;
 
-        if (positions_.find(symbol) == positions_.end()) {
-            const auto& pred_data = predictions.at(symbol);
+        // Skip if already holding
+        if (positions_.find(symbol) != positions_.end()) {
+            continue;
+        }
 
-            double size = calculate_position_size(symbol, pred_data);
+        // Skip if in rotation cooldown
+        if (in_rotation_cooldown(symbol)) {
+            continue;
+        }
 
-            // Make sure we have enough cash
-            if (size > cash_ * 0.95) {
-                size = cash_ * 0.95;
+        const auto& pred_data = predictions.at(symbol);
+        double size = calculate_position_size(symbol, pred_data);
+
+        // Make sure we have enough cash
+        if (size > cash_ * 0.95) {
+            size = cash_ * 0.95;
+        }
+
+        if (size > 100) {  // Minimum position size $100
+            auto it = market_data.find(symbol);
+            if (it != market_data.end()) {
+                // Check position compatibility (prevent inverse positions)
+                if (!is_position_compatible(symbol)) {
+                    continue;  // Skip this symbol (message already logged)
+                }
+
+                // Check signal confirmations (RSI, BB, Volume)
+                bool is_long = pred_data.prediction.pred_5bar.prediction > 0;
+                int confirmations = check_signal_confirmations(symbol, it->second, pred_data.features, is_long);
+                if (confirmations < config_.min_confirmations_required) {
+                    if (bars_seen_ % 100 == 0) {  // Only log occasionally to reduce noise
+                        std::cout << "  [CONFIRMATION BLOCKED] " << symbol
+                                  << " (" << confirmations << "/" << config_.min_confirmations_required << ")\n";
+                    }
+                    continue;  // Skip - insufficient confirmations
+                }
+
+                enter_position(symbol, it->second.close, it->second.timestamp, size, it->second.bar_id);
+
+                // Record entry with trade filter
+                trade_filter_->record_entry(
+                    symbol,
+                    static_cast<int>(bars_seen_),
+                    pred_data.prediction.pred_5bar.prediction,
+                    it->second.close
+                );
+
+                // Log entry with multi-horizon info
+                std::cout << "  [ENTRY] " << symbol
+                         << " at $" << std::fixed << std::setprecision(2)
+                         << it->second.close
+                         << " | 1-bar: " << std::setprecision(4)
+                         << (pred_data.prediction.pred_1bar.prediction * 100) << "%"
+                         << " | 5-bar: " << (pred_data.prediction.pred_5bar.prediction * 100) << "%"
+                         << " | conf: " << std::setprecision(2)
+                         << (pred_data.prediction.pred_5bar.confidence * 100) << "%\n";
+            }
+        }
+    }
+
+    // Step 2: Check if rotation is warranted (all slots filled + better signal available)
+    if (config_.enable_rotation && positions_.size() >= config_.max_positions) {
+        // Find the next best signal not currently held
+        for (size_t i = 0; i < ranked.size(); ++i) {
+            const auto& [candidate_symbol, candidate_strength] = ranked[i];
+
+            // Skip if already holding
+            if (positions_.find(candidate_symbol) != positions_.end()) {
+                continue;
             }
 
-            if (size > 100) {  // Minimum position size $100
-                auto it = market_data.find(symbol);
+            // Skip if doesn't pass filters (same as entry check)
+            const auto& pred_data = predictions.at(candidate_symbol);
+            double probability = prediction_to_probability(pred_data.prediction.pred_5bar.prediction);
+            bool is_long = pred_data.prediction.pred_5bar.prediction > 0;
+            auto bar_it = market_data.find(candidate_symbol);
+            if (bar_it != market_data.end()) {
+                probability = apply_bb_amplification(probability, candidate_symbol, bar_it->second, is_long);
+            }
+            bool passes_probability = is_long ? (probability > config_.buy_threshold)
+                                               : (probability < config_.sell_threshold);
+            bool passes_filter = trade_filter_->can_enter_position(
+                    candidate_symbol, static_cast<int>(bars_seen_), pred_data.prediction);
+
+            if (!passes_probability || !passes_filter) {
+                continue;  // Candidate doesn't meet entry criteria
+            }
+
+            // Skip if in rotation cooldown
+            if (in_rotation_cooldown(candidate_symbol)) {
+                continue;
+            }
+
+            // Find weakest current position
+            Symbol weakest = find_weakest_position(predictions);
+            if (weakest.empty()) {
+                break;  // No positions to rotate
+            }
+
+            // Get weakest strength and prediction
+            double weakest_pred = predictions.at(weakest).prediction.pred_5bar.prediction;
+            double weakest_strength = std::abs(weakest_pred);
+
+            // CRITICAL: Only rotate if signals have SAME direction
+            // Rotating from LONG → SHORT (or vice versa) is a signal reversal, not a rotation!
+            double candidate_pred = pred_data.prediction.pred_5bar.prediction;
+            bool same_direction = (weakest_pred > 0 && candidate_pred > 0) ||
+                                 (weakest_pred < 0 && candidate_pred < 0);
+
+            if (!same_direction) {
+                continue;  // Don't rotate opposite directions - wait for signal deterioration to exit
+            }
+
+            // Check if rotation is justified by strength delta
+            double strength_delta = candidate_strength - weakest_strength;
+
+            if (strength_delta >= config_.rotation_strength_delta) {
+                // ROTATION JUSTIFIED - exit weakest and enter stronger signal
+                auto it = market_data.find(weakest);
                 if (it != market_data.end()) {
-                    enter_position(symbol, it->second.close, it->second.timestamp, size, it->second.bar_id);
+                    std::cout << "  [ROTATION] OUT: " << weakest
+                             << " (strength: " << std::fixed << std::setprecision(4)
+                             << (weakest_strength * 10000) << " bps)"
+                             << " → IN: " << candidate_symbol
+                             << " (strength: " << (candidate_strength * 10000) << " bps)"
+                             << " | Delta: " << (strength_delta * 10000) << " bps\n";
 
-                    // Record entry with trade filter
-                    trade_filter_->record_entry(
-                        symbol,
-                        static_cast<int>(bars_seen_),
-                        pred_data.prediction.pred_5bar.prediction,
-                        it->second.close
-                    );
+                    // Exit weakest
+                    exit_position(weakest, it->second.close, it->second.timestamp, it->second.bar_id);
 
-                    // Log entry with multi-horizon info
-                    std::cout << "  [ENTRY] " << symbol
-                             << " at $" << std::fixed << std::setprecision(2)
-                             << it->second.close
-                             << " | 1-bar: " << std::setprecision(4)
-                             << (pred_data.prediction.pred_1bar.prediction * 100) << "%"
-                             << " | 5-bar: " << (pred_data.prediction.pred_5bar.prediction * 100) << "%"
-                             << " | conf: " << std::setprecision(2)
-                             << (pred_data.prediction.pred_5bar.confidence * 100) << "%\n";
+                    // Set rotation cooldown for the exited symbol
+                    rotation_cooldowns_[weakest] = config_.rotation_cooldown_bars;
+
+                    // Enter stronger candidate (same logic as regular entry)
+                    double size = calculate_position_size(candidate_symbol, pred_data);
+                    if (size > cash_ * 0.95) {
+                        size = cash_ * 0.95;
+                    }
+
+                    if (size > 100) {
+                        auto entry_it = market_data.find(candidate_symbol);
+                        if (entry_it != market_data.end()) {
+                            if (is_position_compatible(candidate_symbol)) {
+                                // Check signal confirmations for rotation entry too
+                                bool is_long_rotation = pred_data.prediction.pred_5bar.prediction > 0;
+                                int rotation_confirmations = check_signal_confirmations(
+                                    candidate_symbol, entry_it->second, pred_data.features, is_long_rotation);
+
+                                if (rotation_confirmations < config_.min_confirmations_required) {
+                                    std::cout << "  [ROTATION BLOCKED] " << candidate_symbol
+                                              << " (confirmations: " << rotation_confirmations
+                                              << "/" << config_.min_confirmations_required << ")\n";
+                                    break;  // Don't rotate if new position doesn't meet confirmation criteria
+                                }
+
+                                enter_position(candidate_symbol, entry_it->second.close,
+                                             entry_it->second.timestamp, size, entry_it->second.bar_id);
+
+                                trade_filter_->record_entry(
+                                    candidate_symbol,
+                                    static_cast<int>(bars_seen_),
+                                    pred_data.prediction.pred_5bar.prediction,
+                                    entry_it->second.close
+                                );
+
+                                std::cout << "  [ENTRY] " << candidate_symbol
+                                         << " at $" << std::fixed << std::setprecision(2)
+                                         << entry_it->second.close
+                                         << " (via rotation, confirmations: " << rotation_confirmations << ")\n";
+                            }
+                        }
+                    }
+
+                    break;  // Only one rotation per bar
                 }
+            } else {
+                // Not enough improvement - stop checking
+                break;
             }
         }
     }
@@ -400,6 +739,13 @@ void MultiSymbolTrader::update_positions(
         }
 
         const auto& pred_data = pred_it->second;
+
+        // Check price-based exits first (MA crossover, trailing stop)
+        std::string price_exit_reason;
+        if (should_exit_on_price(symbol, current_price, price_exit_reason)) {
+            to_exit.push_back(symbol);
+            continue;  // Skip trade filter check if price-based exit triggered
+        }
 
         // Check if we should exit using trade filter
         // This handles: emergency stops, profit targets, max hold, signal quality, etc.
@@ -437,9 +783,6 @@ void MultiSymbolTrader::update_positions(
             }
 
             exit_position(symbol, it->second.close, it->second.timestamp, it->second.bar_id);
-
-            // Record exit with trade filter
-            trade_filter_->record_exit(symbol, static_cast<int>(bars_seen_));
 
             // Log exit with details
             std::cout << "  [EXIT] " << symbol
@@ -523,6 +866,52 @@ double MultiSymbolTrader::calculate_position_size(const Symbol& symbol, const Pr
     return position_capital;
 }
 
+bool MultiSymbolTrader::is_position_compatible(const Symbol& new_symbol) const {
+    // Define inverse ETF pairs (leveraged bull/bear pairs)
+    static const std::map<std::string, std::string> inverse_pairs = {
+        // 3x Tech (NASDAQ-100)
+        {"TQQQ", "SQQQ"}, {"SQQQ", "TQQQ"},
+
+        // 3x Small Cap (Russell 2000)
+        {"TNA", "TZA"}, {"TZA", "TNA"},
+
+        // 3x Semiconductors
+        {"SOXL", "SOXS"}, {"SOXS", "SOXL"},
+
+        // 2x S&P 500
+        {"SSO", "SDS"}, {"SDS", "SSO"},
+
+        // Volatility
+        {"UVXY", "SVIX"}, {"SVIX", "UVXY"},
+
+        // 3x Energy
+        {"ERX", "ERY"}, {"ERY", "ERX"},
+
+        // 3x Financials
+        {"FAS", "FAZ"}, {"FAZ", "FAS"},
+
+        // 3x S&P 500
+        {"SPXL", "SPXS"}, {"SPXS", "SPXL"}
+    };
+
+    // Check if new symbol would create contradictory position
+    for (const auto& [symbol, pos] : positions_) {
+        // Look up if current position has an inverse pair
+        auto it = inverse_pairs.find(symbol);
+        if (it != inverse_pairs.end()) {
+            // Check if new symbol is the inverse of current position
+            if (it->second == new_symbol) {
+                // Inverse position blocked - always log this important safety check
+                std::cout << "  ⚠️  POSITION BLOCKED: " << new_symbol
+                          << " is inverse of existing position " << symbol << "\n";
+                return false;  // Inverse position not allowed
+            }
+        }
+    }
+
+    return true;  // Compatible with existing positions
+}
+
 void MultiSymbolTrader::enter_position(const Symbol& symbol, Price price,
                                        Timestamp time, double capital, uint64_t bar_id) {
     if (capital > cash_) {
@@ -567,6 +956,16 @@ void MultiSymbolTrader::enter_position(const Symbol& symbol, Price price,
         positions_[symbol] = pos;
         cash_ -= total_cost;
         total_transaction_costs_ += entry_costs.total_cost;
+
+        // Initialize exit tracking for price-based exits
+        if (config_.enable_price_based_exits) {
+            ExitTrackingData tracking;
+            tracking.entry_ma = calculate_exit_ma(symbol);
+            tracking.max_profit_pct = 0.0;
+            tracking.max_profit_price = price;
+            tracking.is_long = (shares > 0);
+            exit_tracking_[symbol] = tracking;
+        }
     }
 }
 
@@ -603,10 +1002,31 @@ double MultiSymbolTrader::exit_position(const Symbol& symbol, Price price, Times
     // Also add to complete trade log for export
     all_trades_log_.push_back(trade);
 
+    // Memory management: Limit trade log size to prevent unbounded growth
+    // Keep most recent 10,000 trades, archive older ones
+    if (all_trades_log_.size() > 10000) {
+        // Remove oldest 5,000 trades (keep newest 5,000)
+        all_trades_log_.erase(
+            all_trades_log_.begin(),
+            all_trades_log_.begin() + 5000
+        );
+    }
+
+    // Track daily wins/losses
+    if (net_pnl > 0) {
+        daily_winning_trades_++;
+    } else if (net_pnl < 0) {
+        daily_losing_trades_++;
+    }
+
     cash_ += proceeds;
     total_transaction_costs_ += exit_costs.total_cost;
     positions_.erase(it);
+    exit_tracking_.erase(symbol);  // Clean up exit tracking
     total_trades_++;
+
+    // Notify trade filter that position is closed
+    trade_filter_->record_exit(symbol, static_cast<int>(bars_seen_));
 
     return net_pnl;
 }
@@ -694,7 +1114,8 @@ MultiSymbolTrader::BacktestResults MultiSymbolTrader::get_results() const {
                           ? (results.final_equity - config_.initial_capital) / config_.initial_capital
                           : 0.0;
 
-    double days_traded = static_cast<double>(bars_seen_) / config_.bars_per_day;
+    // Calculate MRD using trading_bars_ (excludes warmup period)
+    double days_traded = static_cast<double>(trading_bars_) / config_.bars_per_day;
     results.mrd = (days_traded > 0) ? results.total_return / days_traded : 0.0;
 
     results.max_drawdown = 0.0;  // TODO: Implement drawdown tracking
@@ -717,6 +1138,9 @@ MultiSymbolTrader::BacktestResults MultiSymbolTrader::get_results() const {
 
     // Net return after costs
     results.net_return_after_costs = results.total_return;  // Already includes costs in cash
+
+    // Daily breakdown
+    results.daily_breakdown = daily_results_;
 
     return results;
 }
@@ -882,6 +1306,389 @@ double MultiSymbolTrader::apply_bb_amplification(
     }
 
     return probability;
+}
+
+int MultiSymbolTrader::check_signal_confirmations(
+    const Symbol& symbol, const Bar& bar,
+    const Eigen::VectorXd& features, bool is_long) const {
+
+    if (!config_.enable_signal_confirmation) {
+        return config_.min_confirmations_required;  // Pass if disabled
+    }
+
+    int confirmations = 0;
+
+    // === 1. RSI CONFIRMATION ===
+    // Feature index 20 is RSI (from feature_extractor.cpp line 59)
+    // RSI in [0, 1] range: 0 = extremely oversold, 1 = extremely overbought
+    double rsi = features(20);
+
+    if (is_long) {
+        // For longs, want RSI < oversold threshold (buy the dip)
+        if (rsi < config_.rsi_oversold_threshold) {
+            confirmations++;
+        }
+    } else {
+        // For shorts, want RSI > overbought threshold (sell the rip)
+        if (rsi > config_.rsi_overbought_threshold) {
+            confirmations++;
+        }
+    }
+
+    // === 2. BOLLINGER BAND CONFIRMATION ===
+    // Check if price is near band extremes (mean reversion setup)
+    BBands bands = calculate_bollinger_bands(symbol, bar);
+
+    if (bands.middle > 0.0) {  // Valid bands
+        double band_width = bands.upper - bands.lower;
+        if (band_width > 0.0) {
+            // Calculate position within bands: 0 = lower band, 0.5 = middle, 1 = upper band
+            double bb_position = (bar.close - bands.lower) / band_width;
+
+            if (is_long) {
+                // For longs, want price near lower band (oversold)
+                // bb_position < 0.15 means within 15% of lower band
+                if (bb_position < (1.0 - config_.bb_extreme_threshold)) {
+                    confirmations++;
+                }
+            } else {
+                // For shorts, want price near upper band (overbought)
+                // bb_position > 0.85 means within 15% of upper band
+                if (bb_position > config_.bb_extreme_threshold) {
+                    confirmations++;
+                }
+            }
+        }
+    }
+
+    // === 3. VOLUME SURGE CONFIRMATION ===
+    // Feature index 15 is volume surge (from feature_extractor.cpp line 48)
+    // volume_surge > 1.0 means above average, > 1.3 means significant surge
+    double volume_surge = features(15);
+
+    if (volume_surge > config_.volume_surge_threshold) {
+        confirmations++;
+    }
+
+    return confirmations;
+}
+
+double MultiSymbolTrader::calculate_exit_ma(const Symbol& symbol) const {
+    auto it = extractors_.find(symbol);
+    if (it == extractors_.end()) {
+        return 0.0;  // No data
+    }
+
+    const auto& history = it->second->history();
+    size_t count = history.size();
+
+    if (count < static_cast<size_t>(config_.ma_exit_period)) {
+        return 0.0;  // Not enough data
+    }
+
+    // Calculate simple moving average
+    double sum = 0.0;
+    for (size_t i = count - config_.ma_exit_period; i < count; ++i) {
+        sum += history[i].close;
+    }
+
+    return sum / config_.ma_exit_period;
+}
+
+bool MultiSymbolTrader::should_exit_on_price(const Symbol& symbol, Price current_price, std::string& exit_reason) {
+    if (!config_.enable_price_based_exits) {
+        return false;  // Feature disabled
+    }
+
+    auto pos_it = positions_.find(symbol);
+    if (pos_it == positions_.end()) {
+        return false;  // No position
+    }
+
+    auto track_it = exit_tracking_.find(symbol);
+    if (track_it == exit_tracking_.end()) {
+        return false;  // No tracking data (shouldn't happen)
+    }
+
+    const auto& pos = pos_it->second;
+    auto& tracking = track_it->second;
+
+    // Update max profit tracking
+    double current_profit_pct = pos.pnl_percentage(current_price);
+    if (current_profit_pct > tracking.max_profit_pct) {
+        tracking.max_profit_pct = current_profit_pct;
+        tracking.max_profit_price = current_price;
+    }
+
+    // === EXIT CONDITION 1: MA CROSSOVER (Mean Reversion Complete) ===
+    if (config_.exit_on_ma_crossover && tracking.entry_ma > 0.0) {
+        double current_ma = calculate_exit_ma(symbol);
+        if (current_ma > 0.0) {
+            bool crossed_ma = false;
+
+            if (tracking.is_long) {
+                // For longs: entered below MA, exit when price crosses ABOVE MA
+                crossed_ma = (current_price > current_ma) && (pos.entry_price < tracking.entry_ma);
+            } else {
+                // For shorts: entered above MA, exit when price crosses BELOW MA
+                crossed_ma = (current_price < current_ma) && (pos.entry_price > tracking.entry_ma);
+            }
+
+            if (crossed_ma) {
+                exit_reason = "MA_Crossover";
+                return true;
+            }
+        }
+    }
+
+    // === EXIT CONDITION 2: TRAILING STOP (Lock in profits) ===
+    if (tracking.max_profit_pct > 0.0) {
+        // Trail stop at configured percentage of max profit
+        double trail_threshold = tracking.max_profit_pct * config_.trailing_stop_percentage;
+
+        if (current_profit_pct < trail_threshold) {
+            exit_reason = "TrailingStop";
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// =============================================================================
+// Warmup Phase Management
+// =============================================================================
+
+void MultiSymbolTrader::update_phase() {
+    if (!config_.warmup.enabled) {
+        config_.current_phase = TradingConfig::LIVE_TRADING;
+        return;
+    }
+
+    int days_complete = bars_seen_ / config_.bars_per_day;
+
+    if (days_complete < config_.warmup.observation_days) {
+        config_.current_phase = TradingConfig::WARMUP_OBSERVATION;
+    }
+    else if (days_complete < config_.warmup.observation_days + config_.warmup.simulation_days) {
+        // Transition to simulation
+        if (config_.current_phase == TradingConfig::WARMUP_OBSERVATION) {
+            std::cout << "\n📊 Transitioning from OBSERVATION to SIMULATION phase\n";
+            warmup_metrics_.starting_equity = cash_;
+            warmup_metrics_.current_equity = cash_;
+            warmup_metrics_.max_equity = cash_;
+        }
+        config_.current_phase = TradingConfig::WARMUP_SIMULATION;
+    }
+    else {
+        // Check if we meet go-live criteria
+        if (config_.current_phase == TradingConfig::WARMUP_SIMULATION) {
+            if (evaluate_warmup_complete()) {
+                config_.current_phase = TradingConfig::WARMUP_COMPLETE;
+                std::cout << "\n✅ WARMUP COMPLETE - Ready for live trading\n";
+                print_warmup_summary();
+            } else {
+                std::cout << "\n❌ Warmup criteria not met - extending simulation\n";
+                // Stay in simulation
+            }
+        }
+    }
+}
+
+void MultiSymbolTrader::handle_observation_phase(const std::unordered_map<Symbol, Bar>& market_data) {
+    warmup_metrics_.observation_bars_complete++;
+
+    if (bars_seen_ % 100 == 0) {
+        std::cout << "  [OBSERVATION] Bar " << bars_seen_
+                  << " - Learning patterns, no trades\n";
+    }
+}
+
+void MultiSymbolTrader::handle_simulation_phase(
+    const std::unordered_map<Symbol, PredictionData>& predictions,
+    const std::unordered_map<Symbol, Bar>& market_data) {
+
+    warmup_metrics_.simulation_bars_complete++;
+
+    // Run normal trading logic (reuse existing code)
+    if (bars_seen_ > config_.min_bars_to_learn || trading_bars_ > 0) {
+        trading_bars_++;
+
+        // Track equity before trades
+        double pre_trade_equity = get_equity(market_data);
+
+        // Run normal trading
+        make_trades(predictions, market_data);
+
+        // Track equity after trades
+        warmup_metrics_.current_equity = get_equity(market_data);
+        warmup_metrics_.update_drawdown();
+
+        // Record simulated trades (they're already in all_trades_log_)
+        if (all_trades_log_.size() > warmup_metrics_.simulated_trades.size()) {
+            warmup_metrics_.simulated_trades = all_trades_log_;
+        }
+    }
+
+    if (bars_seen_ % 100 == 0) {
+        double sim_return = warmup_metrics_.starting_equity > 0 ?
+            (warmup_metrics_.current_equity - warmup_metrics_.starting_equity) /
+            warmup_metrics_.starting_equity * 100 : 0.0;
+
+        std::cout << "  [SIMULATION] Bar " << bars_seen_
+                  << " | Equity: $" << std::fixed << std::setprecision(2)
+                  << warmup_metrics_.current_equity
+                  << " (" << std::showpos << sim_return << "%" << std::noshowpos << ")"
+                  << " | Trades: " << warmup_metrics_.simulated_trades.size() << "\n";
+    }
+}
+
+void MultiSymbolTrader::handle_live_phase(
+    const std::unordered_map<Symbol, PredictionData>& predictions,
+    const std::unordered_map<Symbol, Bar>& market_data) {
+
+    // Normal trading - exactly as before warmup was added
+    if (bars_seen_ > config_.min_bars_to_learn || trading_bars_ > 0) {
+        trading_bars_++;
+        make_trades(predictions, market_data);
+    }
+}
+
+bool MultiSymbolTrader::evaluate_warmup_complete() {
+    const auto& cfg = config_.warmup;
+    const auto& metrics = warmup_metrics_;
+
+    // CRITICAL WARNING: Alert if using TESTING mode
+    if (cfg.mode == TradingConfig::WarmupMode::TESTING) {
+        std::cout << "\n⚠️  WARNING: Warmup in TESTING mode (relaxed criteria)\n";
+        std::cout << "⚠️  NOT SAFE FOR LIVE TRADING - Use PRODUCTION mode for real money!\n\n";
+    }
+
+    // Check minimum trades
+    if (static_cast<int>(metrics.simulated_trades.size()) < cfg.min_trades) {
+        std::cout << "  ❌ Too few trades: " << metrics.simulated_trades.size()
+                  << " < " << cfg.min_trades << "\n";
+        return false;
+    }
+
+    // Check Sharpe ratio
+    double sharpe = metrics.calculate_sharpe();
+    if (sharpe < cfg.min_sharpe_ratio) {
+        std::cout << "  ❌ Sharpe too low: " << std::fixed << std::setprecision(2)
+                  << sharpe << " < " << cfg.min_sharpe_ratio
+                  << " [Mode: " << cfg.get_mode_name() << "]\n";
+        return false;
+    }
+
+    // Check drawdown
+    if (metrics.max_drawdown > cfg.max_drawdown) {
+        std::cout << "  ❌ Drawdown too high: " << (metrics.max_drawdown * 100)
+                  << "% > " << (cfg.max_drawdown * 100) << "%"
+                  << " [Mode: " << cfg.get_mode_name() << "]\n";
+        return false;
+    }
+
+    // Check profitability
+    double total_return = metrics.starting_equity > 0 ?
+        (metrics.current_equity - metrics.starting_equity) / metrics.starting_equity : 0.0;
+
+    if (cfg.require_positive_return && total_return < 0) {
+        std::cout << "  ❌ Negative return: " << (total_return * 100) << "%\n";
+        return false;
+    }
+
+    // All checks passed
+    std::cout << "  ✅ All warmup criteria met [Mode: " << cfg.get_mode_name() << "]\n";
+    return true;
+}
+
+void MultiSymbolTrader::print_warmup_summary() {
+    std::cout << "\n========== WARMUP SUMMARY ==========\n";
+    std::cout << "Observation: " << config_.warmup.observation_days << " days\n";
+    std::cout << "Simulation: " << config_.warmup.simulation_days << " days\n";
+    std::cout << "\nResults:\n";
+
+    double total_return = warmup_metrics_.starting_equity > 0 ?
+        (warmup_metrics_.current_equity - warmup_metrics_.starting_equity) /
+        warmup_metrics_.starting_equity : 0.0;
+
+    std::cout << "  Return: " << std::fixed << std::setprecision(2)
+              << (total_return * 100) << "%\n";
+    std::cout << "  Sharpe: " << warmup_metrics_.calculate_sharpe() << "\n";
+    std::cout << "  Max DD: " << (warmup_metrics_.max_drawdown * 100) << "%\n";
+    std::cout << "  Trades: " << warmup_metrics_.simulated_trades.size() << "\n";
+
+    // Win/loss breakdown
+    int wins = 0, losses = 0;
+    for (const auto& trade : warmup_metrics_.simulated_trades) {
+        if (trade.pnl > 0) wins++;
+        else if (trade.pnl < 0) losses++;
+    }
+
+    if (!warmup_metrics_.simulated_trades.empty()) {
+        std::cout << "  Win Rate: " << std::fixed << std::setprecision(1)
+                  << (100.0 * wins / warmup_metrics_.simulated_trades.size())
+                  << "% (" << wins << "W/" << losses << "L)\n";
+    }
+
+    std::cout << "\n✅ All criteria met - ready for live\n";
+    std::cout << "====================================\n\n";
+}
+
+// ============================================================================
+// ROTATION LOGIC (from online_trader)
+// ============================================================================
+
+Symbol MultiSymbolTrader::find_weakest_position(
+    const std::unordered_map<Symbol, PredictionData>& predictions) const {
+
+    if (positions_.empty()) {
+        return "";
+    }
+
+    Symbol weakest_symbol;
+    double min_strength = std::numeric_limits<double>::max();
+
+    for (const auto& [symbol, position] : positions_) {
+        // Get current signal strength for this position
+        auto pred_it = predictions.find(symbol);
+        if (pred_it == predictions.end()) {
+            continue;  // No prediction available - skip
+        }
+
+        // Use 5-bar prediction strength (absolute value)
+        double strength = std::abs(pred_it->second.prediction.pred_5bar.prediction);
+
+        if (strength < min_strength) {
+            min_strength = strength;
+            weakest_symbol = symbol;
+        }
+    }
+
+    return weakest_symbol;
+}
+
+void MultiSymbolTrader::update_rotation_cooldowns() {
+    // Decrement all cooldowns
+    for (auto& [symbol, cooldown] : rotation_cooldowns_) {
+        if (cooldown > 0) {
+            cooldown--;
+        }
+    }
+
+    // Remove expired cooldowns (cleanup)
+    for (auto it = rotation_cooldowns_.begin(); it != rotation_cooldowns_.end(); ) {
+        if (it->second <= 0) {
+            it = rotation_cooldowns_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+bool MultiSymbolTrader::in_rotation_cooldown(const Symbol& symbol) const {
+    auto it = rotation_cooldowns_.find(symbol);
+    return (it != rotation_cooldowns_.end() && it->second > 0);
 }
 
 } // namespace trading

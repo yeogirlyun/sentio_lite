@@ -53,7 +53,7 @@ public:
         double emergency_stop_loss_pct;    // -1% stop loss
 
         Config()
-            : min_bars_to_hold(10)               // Increased to 10 bars (predictions need time to realize)
+            : min_bars_to_hold(5)                // Reduced from 10 to allow more flexibility
             , typical_hold_period(20)
             , max_bars_to_hold(60)
             , min_bars_between_entries(5)        // Cooldown to prevent rapid churn
@@ -61,8 +61,8 @@ public:
             , max_trades_per_day(200)            // Reasonable limit
             , min_prediction_for_entry(0.0005)   // 5 bps (was 20 bps)
             , min_confidence_for_entry(0.5)      // 50% (was 60%)
-            , exit_signal_reversed_threshold(-0.0005)
-            , exit_confidence_threshold(0.4)
+            , exit_signal_reversed_threshold(-0.001)   // Exit if signal reverses to -10bps (was -5bps, too sensitive)
+            , exit_confidence_threshold(0.25)          // Exit if confidence drops below 25% (was 40%, too strict)
             , profit_target_multiple(2.0)
             , emergency_stop_loss_pct(-0.01) {}
     };
@@ -139,6 +139,13 @@ public:
      * Called at each bar to track position duration
      */
     void update_bars_held(int current_bar);
+
+    /**
+     * Reset daily frequency limits
+     * Called at EOD to reset trade frequency tracking for new day.
+     * Keeps position state (bars held) intact but clears frequency counters.
+     */
+    void reset_daily_limits(int current_bar);
 
     /**
      * Get position state for symbol

@@ -11,6 +11,7 @@
 #include <memory>
 #include <vector>
 #include <deque>
+#include <numeric>
 
 namespace trading {
 
@@ -53,8 +54,8 @@ struct TradingConfig {
     // Probability-based trading (from online_trader)
     bool enable_probability_scaling = true;   // Convert predictions to probabilities
     double probability_scaling_factor = 50.0; // Tanh scaling factor
-    double buy_threshold = 0.60;              // Probability threshold for entry (increased for selectivity)
-    double sell_threshold = 0.40;             // Probability threshold for exit (wider spread)
+    double buy_threshold = 0.55;              // Probability threshold for entry (more reasonable)
+    double sell_threshold = 0.45;             // Probability threshold for exit (symmetric)
 
     // Bollinger Band amplification (from online_trader)
     bool enable_bb_amplification = true;      // Boost signals near BB bands
@@ -63,20 +64,124 @@ struct TradingConfig {
     double bb_proximity_threshold = 0.30;     // Within 30% of band for boost
     double bb_amplification_factor = 0.10;    // Boost probability by this much
 
+    // Rotation strategy configuration (from online_trader)
+    bool enable_rotation = true;              // Enable rank-based rotation
+    double rotation_strength_delta = 0.01;    // Minimum improvement (100 bps) to rotate - was 0.002 (too aggressive)
+    int rotation_cooldown_bars = 10;          // Prevent re-entry after rotation
+    double min_rank_strength = 0.001;         // Minimum signal strength (10 bps) to hold
+
+    // Mean reversion predictor configuration
+    bool enable_mean_reversion_predictor = false; // Use deviation-based targets instead of raw returns (EXPERIMENTAL)
+    double reversion_factor = 0.5;                // Expected reversion strength (0.5 = 50% reversion to MA)
+    int ma_period_1bar = 5;                       // MA period for 1-bar predictions (short-term mean)
+    int ma_period_5bar = 10;                      // MA period for 5-bar predictions (medium-term mean)
+    int ma_period_10bar = 20;                     // MA period for 10-bar predictions (longer-term mean)
+
+    // Signal confirmation configuration (expert recommendation)
+    bool enable_signal_confirmation = true;       // Require multiple confirming indicators before entry
+    int min_confirmations_required = 1;           // Minimum number of confirmations needed (1-3, 1=lenient, 2=moderate, 3=strict)
+    double rsi_oversold_threshold = 0.30;         // RSI below this = oversold (bullish signal)
+    double rsi_overbought_threshold = 0.70;       // RSI above this = overbought (bearish signal)
+    double bb_extreme_threshold = 0.80;           // Within 20% of BB band = extreme (80% from center)
+    double volume_surge_threshold = 1.2;          // Volume 20% above average = surge confirmation
+
+    // Price-based exit configuration (mean reversion completion)
+    bool enable_price_based_exits = true;         // Exit when mean reversion completes
+    bool exit_on_ma_crossover = true;             // Exit when price crosses back through MA
+    double trailing_stop_percentage = 0.50;       // Trail stop at 50% of max profit
+    int ma_exit_period = 10;                      // MA period for exit crossover detection
+
+    // Warmup configuration mode
+    enum class WarmupMode {
+        PRODUCTION,  // Strict criteria - SAFE FOR LIVE TRADING
+        TESTING      // Relaxed criteria - DEVELOPMENT/TESTING ONLY
+    };
+
+    // Warmup configuration for improved pre-live validation
+    struct WarmupConfig {
+        bool enabled = true;                     // Enable warmup phase (DEFAULT)
+        int observation_days = 1;                // Learn without trading
+        int simulation_days = 2;                 // Paper trade before live
+
+        // Configuration mode (CRITICAL: Set to PRODUCTION before live trading!)
+        WarmupMode mode = WarmupMode::PRODUCTION;
+
+        // Go-live criteria (values set based on mode)
+        double min_sharpe_ratio;                 // Minimum Sharpe ratio to go live
+        double max_drawdown;                     // Maximum drawdown allowed
+        int min_trades = 20;                     // Minimum trades to evaluate
+        bool require_positive_return;            // Require positive return to go live
+
+        // State preservation
+        bool preserve_predictor_state = true;    // Keep EWRLS weights
+        bool preserve_trade_history = true;      // Keep trade history for sizing
+        double history_decay_factor = 0.7;       // Weight historical trades at 70%
+
+        // Constructor: Initialize based on mode
+        WarmupConfig() {
+            set_mode(WarmupMode::PRODUCTION);  // DEFAULT TO PRODUCTION (SAFE)
+        }
+
+        // Set mode and apply corresponding criteria
+        void set_mode(WarmupMode m) {
+            mode = m;
+            if (mode == WarmupMode::PRODUCTION) {
+                // PRODUCTION: Strict criteria - SAFE FOR LIVE TRADING
+                min_sharpe_ratio = 0.3;          // Minimum 0.3 Sharpe ratio
+                max_drawdown = 0.15;             // Maximum 15% drawdown
+                require_positive_return = true;  // Must be profitable
+            } else {
+                // TESTING: Relaxed criteria - DEVELOPMENT/TESTING ONLY
+                min_sharpe_ratio = -2.0;         // Very lenient (allows testing approval logic)
+                max_drawdown = 0.30;             // Lenient 30% drawdown
+                require_positive_return = false; // Allow negative returns
+            }
+        }
+
+        // Get mode name for logging
+        std::string get_mode_name() const {
+            return mode == WarmupMode::PRODUCTION ? "PRODUCTION (STRICT)" : "TESTING (RELAXED)";
+        }
+    } warmup;
+
+    // Trading phase tracking
+    enum Phase {
+        WARMUP_OBSERVATION,   // Days 1-2: Learning only
+        WARMUP_SIMULATION,    // Days 3-7: Paper trading
+        WARMUP_COMPLETE,      // Warmup done, ready for live
+        LIVE_TRADING          // Actually trading
+    };
+    Phase current_phase = LIVE_TRADING;  // Default to live (warmup disabled)
+
     TradingConfig() {
-        // Set reasonable defaults for multi-horizon (MORE ADAPTIVE)
-        horizon_config.lambda_1bar = 0.98;   // Was 0.99 - faster adaptation
-        horizon_config.lambda_5bar = 0.99;   // Was 0.995 - faster adaptation
-        horizon_config.lambda_10bar = 0.995; // Was 0.998 - faster adaptation
-        horizon_config.min_confidence = 0.5;  // Was 0.6 - lower threshold
+        // Set reasonable defaults for multi-horizon (RESPONSIVE for minute-bar mean reversion)
+        // Expert recommendation: Faster lambdas needed for HFT mean reversion (not slow trend following)
+        horizon_config.lambda_1bar = 0.98;   // 34 bar half-life (34 minutes) - responsive to recent regime shifts
+        horizon_config.lambda_5bar = 0.99;   // 69 bar half-life (1.15 hours) - medium-term pattern detection
+        horizon_config.lambda_10bar = 0.995; // 138 bar half-life (2.3 hours) - longer-term trend context
+        horizon_config.min_confidence = 0.4; // Lower threshold for consistency (was 0.5)
 
         // Set reasonable defaults for trade filter (SELECTIVE for probability-based trading)
-        filter_config.min_bars_to_hold = 10;  // Increased: predictions need time to realize
-        filter_config.typical_hold_period = 20;
-        filter_config.max_bars_to_hold = 60;
+        // INCREASED to reduce churning - signal quality should drive exits, not time
+        filter_config.min_bars_to_hold = 20;   // Was 5 - too aggressive
+        filter_config.typical_hold_period = 60;  // Was 20
+        filter_config.max_bars_to_hold = 120;    // Was 60
         filter_config.min_prediction_for_entry = 0.0;     // Disabled (use probability threshold)
         filter_config.min_confidence_for_entry = 0.0;     // Disabled (use probability threshold)
     }
+};
+
+/**
+ * Daily results structure for multi-day tracking
+ */
+struct DailyResults {
+    int day_number;             // 1, 2, 3, ...
+    double start_equity;        // Equity at start of day
+    double end_equity;          // Equity at end of day
+    double daily_return;        // Return for this day
+    int trades_today;           // Trades completed today
+    int winning_trades_today;   // Winning trades today
+    int losing_trades_today;    // Losing trades today
 };
 
 /**
@@ -103,10 +208,19 @@ private:
     TradingConfig config_;
     double cash_;
 
+    // Exit tracking data for price-based exits
+    struct ExitTrackingData {
+        double entry_ma = 0.0;           // MA value at entry time
+        double max_profit_pct = 0.0;     // Maximum profit % seen
+        Price max_profit_price = 0.0;    // Price where max profit occurred
+        bool is_long = true;             // Direction of position
+    };
+
     // Per-symbol components
     std::unordered_map<Symbol, std::unique_ptr<MultiHorizonPredictor>> predictors_;
     std::unordered_map<Symbol, std::unique_ptr<FeatureExtractor>> extractors_;
     std::unordered_map<Symbol, PositionWithCosts> positions_;
+    std::unordered_map<Symbol, ExitTrackingData> exit_tracking_;  // Price-based exit tracking
     std::unordered_map<Symbol, std::unique_ptr<TradeHistory>> trade_history_;
     std::unordered_map<Symbol, MarketContext> market_context_;  // Market microstructure data
 
@@ -119,9 +233,65 @@ private:
     // Complete trade log for export (not circular, keeps all trades)
     std::vector<TradeRecord> all_trades_log_;
 
-    size_t bars_seen_;
+    size_t bars_seen_;       // Total bars including warmup
+    size_t trading_bars_;    // Trading bars only (excludes warmup) - used for EOD timing
     int total_trades_;
     double total_transaction_costs_;  // Track cumulative costs
+
+    // Daily tracking (for multi-day testing)
+    std::vector<DailyResults> daily_results_;
+    double daily_start_equity_;       // Equity at start of current day
+    int daily_start_trades_;          // Trades at start of current day
+    int daily_winning_trades_;        // Winning trades today
+    int daily_losing_trades_;         // Losing trades today
+
+    // Warmup phase tracking
+    struct SimulationMetrics {
+        std::vector<TradeRecord> simulated_trades;
+        double starting_equity = 0.0;
+        double current_equity = 0.0;
+        double max_equity = 0.0;
+        double max_drawdown = 0.0;
+        int observation_bars_complete = 0;
+        int simulation_bars_complete = 0;
+
+        void update_drawdown() {
+            max_equity = std::max(max_equity, current_equity);
+            double drawdown = (max_equity > 0) ?
+                (max_equity - current_equity) / max_equity : 0.0;
+            max_drawdown = std::max(max_drawdown, drawdown);
+        }
+
+        double calculate_sharpe() const {
+            if (simulated_trades.size() < 2) return 0.0;
+
+            std::vector<double> returns;
+            for (const auto& trade : simulated_trades) {
+                returns.push_back(trade.pnl_pct);
+            }
+
+            double mean = std::accumulate(returns.begin(), returns.end(), 0.0) / returns.size();
+            double sq_sum = std::inner_product(returns.begin(), returns.end(), returns.begin(), 0.0);
+            double stdev = std::sqrt(sq_sum / returns.size() - mean * mean);
+
+            return (stdev > 0) ? (mean / stdev) * std::sqrt(252) : 0.0; // Annualized
+        }
+    };
+
+    SimulationMetrics warmup_metrics_;
+
+    // Rotation tracking (from online_trader)
+    std::unordered_map<Symbol, int> rotation_cooldowns_;  // Bars until can re-enter after rotation
+
+    // Phase management methods
+    void update_phase();
+    void handle_observation_phase(const std::unordered_map<Symbol, Bar>& market_data);
+    void handle_simulation_phase(const std::unordered_map<Symbol, PredictionData>& predictions,
+                                const std::unordered_map<Symbol, Bar>& market_data);
+    void handle_live_phase(const std::unordered_map<Symbol, PredictionData>& predictions,
+                          const std::unordered_map<Symbol, Bar>& market_data);
+    bool evaluate_warmup_complete();
+    void print_warmup_summary();
 
 public:
     /**
@@ -171,6 +341,9 @@ public:
         double avg_cost_per_trade;       // Average cost per trade
         double cost_as_pct_of_volume;    // Costs as % of total volume traded
         double net_return_after_costs;   // Return after accounting for costs
+
+        // Daily breakdown (for multi-day testing)
+        std::vector<DailyResults> daily_breakdown;
     };
 
     /**
@@ -224,6 +397,12 @@ private:
     void enter_position(const Symbol& symbol, Price price, Timestamp time, double capital, uint64_t bar_id);
 
     /**
+     * Check if a new position is compatible with existing positions
+     * (prevents inverse/contradictory positions like TQQQ + SQQQ)
+     */
+    bool is_position_compatible(const Symbol& new_symbol) const;
+
+    /**
      * Exit existing position
      */
     double exit_position(const Symbol& symbol, Price price, Timestamp time, uint64_t bar_id);
@@ -263,6 +442,49 @@ private:
         double lower = 0.0;
     };
     BBands calculate_bollinger_bands(const Symbol& symbol, const Bar& current_bar) const;
+
+    /**
+     * Check signal confirmation using multiple indicators (expert recommendation)
+     * @param symbol Symbol to check
+     * @param bar Current bar
+     * @param features Feature vector containing RSI, volume, etc.
+     * @param is_long True for long signals, false for short signals
+     * @return Number of confirmations (0-3: RSI, BB, Volume)
+     */
+    int check_signal_confirmations(const Symbol& symbol, const Bar& bar,
+                                   const Eigen::VectorXd& features, bool is_long) const;
+
+    /**
+     * Calculate moving average for exit detection
+     * @param symbol Symbol to calculate MA for
+     * @return MA value, or 0.0 if insufficient data
+     */
+    double calculate_exit_ma(const Symbol& symbol) const;
+
+    /**
+     * Check if position should exit based on price-based logic
+     * @param symbol Symbol to check
+     * @param current_price Current price
+     * @param exit_reason Output parameter for exit reason
+     * @return True if should exit
+     */
+    bool should_exit_on_price(const Symbol& symbol, Price current_price, std::string& exit_reason);
+
+    /**
+     * Find weakest current position for rotation (from online_trader)
+     * Returns symbol with lowest signal strength, or empty string if no positions
+     */
+    Symbol find_weakest_position(const std::unordered_map<Symbol, PredictionData>& predictions) const;
+
+    /**
+     * Update rotation cooldowns (decrement each bar)
+     */
+    void update_rotation_cooldowns();
+
+    /**
+     * Check if symbol is in rotation cooldown
+     */
+    bool in_rotation_cooldown(const Symbol& symbol) const;
 };
 
 } // namespace trading

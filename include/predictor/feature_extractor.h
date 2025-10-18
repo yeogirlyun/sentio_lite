@@ -8,7 +8,7 @@
 namespace trading {
 
 /**
- * Enhanced Feature Extractor - 33 Technical + Time Indicators
+ * Enhanced Feature Extractor - 36 Technical + Time Indicators
  *
  * Extracts comprehensive set of proven technical indicators for online learning:
  * - 8 Time features (cyclical encoding: hour, minute, day-of-week, day-of-month)
@@ -18,6 +18,7 @@ namespace trading {
  * - Price position indicators (range position, channel position)
  * - Trend strength (RSI-like, directional momentum)
  * - Interaction terms (momentum * volatility, etc.)
+ * - Mean reversion indicators (deviation from MA at 5, 10, 20 periods)
  *
  * Optimized for:
  * - O(1) incremental updates via CircularBuffer
@@ -28,7 +29,7 @@ class FeatureExtractor {
 public:
     // Public constants for feature dimensions
     static constexpr size_t LOOKBACK = 50;      // Lookback window size
-    static constexpr size_t NUM_FEATURES = 33;  // 8 time + 25 technical features
+    static constexpr size_t NUM_FEATURES = 36;  // 8 time + 28 technical features
 
     FeatureExtractor();
 
@@ -86,6 +87,9 @@ private:
     double calculate_channel_position(const std::vector<Bar>& bars, int period) const;
     double calculate_rsi_like(const std::vector<Price>& prices, int period) const;
     double calculate_directional_momentum(const std::vector<Price>& prices, int period) const;
+
+    // Mean reversion features
+    double calculate_ma_deviation(const std::vector<Price>& prices, int period) const;
 
     // Utility helpers
     std::vector<Price> get_closes() const;

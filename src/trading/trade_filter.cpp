@@ -153,6 +153,33 @@ void TradeFilter::update_bars_held(int current_bar) {
     }
 }
 
+void TradeFilter::reset_daily_limits(int current_bar) {
+    // Keep recent history, only remove trades older than 1 day
+    // This preserves frequency limits while allowing fresh daily starts
+    int cutoff_bar = current_bar - 390;  // Keep last ~1 day of trades
+    while (!trade_bars_.empty() && trade_bars_.front() < cutoff_bar) {
+        trade_bars_.pop_front();
+    }
+
+    // Only reset exit bars if cooldown has truly expired
+    // Don't unconditionally reset - preserve cross-day cooldowns if recent
+    for (auto& [symbol, state] : position_states_) {
+        if (!state.has_position) {
+            int bars_since_exit = current_bar - state.last_exit_bar;
+            // Only reset if exit was more than 2x the minimum cooldown ago
+            // This prevents immediate re-entry after recent EOD liquidation
+            if (bars_since_exit > config_.min_bars_between_entries * 2) {
+                state.last_exit_bar = -999;
+            }
+            // Otherwise keep the actual exit bar to enforce proper cooldown
+        }
+        // Keep position state intact for active positions (bars_held, entry_bar, etc.)
+    }
+
+    // Update last reset timestamp
+    last_day_reset_ = current_bar;
+}
+
 const TradeFilter::PositionState& TradeFilter::get_position_state(const Symbol& symbol) const {
     static PositionState empty_state;
     auto it = position_states_.find(symbol);
@@ -199,20 +226,31 @@ int TradeFilter::count_recent_trades(int current_bar, int window_bars) const {
 }
 
 bool TradeFilter::check_frequency_limits(int current_bar) const {
-    // Check hourly limit
-    int trades_last_hour = count_recent_trades(current_bar, 60);
-    if (trades_last_hour >= config_.max_trades_per_hour) {
-        return false;
-    }
+    // For multi-day testing, only count trades from current day
+    int current_day = current_bar / 390;
 
-    // Check daily limit
+    // Count trades today only
     int trades_today = 0;
     for (int trade_bar : trade_bars_) {
-        if (trade_bar / 390 == current_bar / 390) {  // Same day
+        if (trade_bar / 390 == current_day) {
             trades_today++;
         }
     }
+
+    // Hourly check should also be day-aware to prevent cross-day counting
+    int trades_last_hour = 0;
+    for (int trade_bar : trade_bars_) {
+        if (trade_bar / 390 == current_day &&    // Same day
+            current_bar - trade_bar <= 60) {     // Within hour
+            trades_last_hour++;
+        }
+    }
+
+    // Check limits
     if (trades_today >= config_.max_trades_per_day) {
+        return false;
+    }
+    if (trades_last_hour >= config_.max_trades_per_hour) {
         return false;
     }
 

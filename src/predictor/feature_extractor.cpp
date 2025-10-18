@@ -75,8 +75,17 @@ std::optional<Eigen::VectorXd> FeatureExtractor::extract(const Bar& bar) {
     features(idx++) = calculate_momentum(prices, 5) - calculate_momentum(prices, 10);
     features(idx++) = features(vol_idx) - features(vol_idx + 1);  // Vol change (10-bar vs 20-bar)
 
-    // ===== DERIVED FEATURES (31-32) =====
+    // ===== DERIVED FEATURES (31) =====
     features(idx++) = std::log(1.0 + std::abs(features(11)));  // Log-scaled momentum (10-bar)
+
+    // ===== MEAN REVERSION FEATURES (32-34) =====
+    // Deviation from moving averages - critical for mean reversion trading
+    // Positive = price above MA (expect reversion down), Negative = price below MA (expect reversion up)
+    features(idx++) = calculate_ma_deviation(prices, 5);   // Short-term MA deviation (5 bars)
+    features(idx++) = calculate_ma_deviation(prices, 10);  // Medium-term MA deviation (10 bars)
+    features(idx++) = calculate_ma_deviation(prices, 20);  // Longer-term MA deviation (20 bars)
+
+    // ===== BIAS TERM (35) =====
     features(idx++) = 1.0;  // Bias term (always 1.0)
 
     prev_close_ = bar.close;
@@ -301,6 +310,26 @@ double FeatureExtractor::calculate_directional_momentum(const std::vector<Price>
 
     // Return net directional bias: +1 all up, -1 all down, 0 neutral
     return static_cast<double>(up_moves - down_moves) / total_moves;
+}
+
+double FeatureExtractor::calculate_ma_deviation(const std::vector<Price>& prices, int period) const {
+    size_t n = prices.size();
+    if (n == 0 || static_cast<size_t>(period) > n) return 0.0;
+
+    // Calculate simple moving average
+    double sum = 0.0;
+    for (int i = 0; i < period; ++i) {
+        sum += prices[n - 1 - i];
+    }
+    double ma = sum / period;
+
+    if (ma == 0 || std::abs(ma) < 1e-10) return 0.0;
+
+    // Calculate normalized deviation: (price - MA) / MA
+    // Positive: price above MA (overbought, expect reversion down)
+    // Negative: price below MA (oversold, expect reversion up)
+    Price current_price = prices[n - 1];
+    return (current_price - ma) / ma;
 }
 
 void FeatureExtractor::reset() {
