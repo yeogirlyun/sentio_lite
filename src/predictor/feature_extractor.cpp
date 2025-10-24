@@ -85,8 +85,38 @@ std::optional<Eigen::VectorXd> FeatureExtractor::extract(const Bar& bar) {
     features(idx++) = calculate_ma_deviation(prices, 10);  // Medium-term MA deviation (10 bars)
     features(idx++) = calculate_ma_deviation(prices, 20);  // Longer-term MA deviation (20 bars)
 
-    // ===== BIAS TERM (35) =====
+    // ===== BOLLINGER BANDS FEATURES (35-40) =====
+    // Calculate Bollinger Bands (20-period, k=2)
+    BollingerBands bb = calculate_bollinger_bands(prices, 20, 2.0);
+    Price current_price = bar.close;
+
+    // BB Mean Deviation: (close - bb_mean) / close
+    features(idx++) = (current_price != 0.0) ? (current_price - bb.mean) / current_price : 0.0;
+
+    // BB Standard Deviation %: bb_sd / close
+    features(idx++) = (current_price != 0.0) ? bb.sd / current_price : 0.0;
+
+    // BB Upper Deviation: (close - bb_upper) / close
+    features(idx++) = (current_price != 0.0) ? (current_price - bb.upper) / current_price : 0.0;
+
+    // BB Lower Deviation: (close - bb_lower) / close
+    features(idx++) = (current_price != 0.0) ? (current_price - bb.lower) / current_price : 0.0;
+
+    // BB %B: Position within bands (0-1)
+    features(idx++) = bb.percent_b;
+
+    // BB Bandwidth: Normalized band width
+    features(idx++) = bb.bandwidth;
+
+    // ===== BIAS TERM (41) =====
     features(idx++) = 1.0;  // Bias term (always 1.0)
+
+    // ===== REGIME FEATURES (42-53) =====
+    // Extract 12 regime-aware features using fast k-means clustering
+    auto regime_features = regime_features_.extract(bars);
+    for (size_t i = 0; i < RegimeFeatures::NUM_REGIME_FEATURES; ++i) {
+        features(idx++) = regime_features(i);
+    }
 
     prev_close_ = bar.close;
     return features;
@@ -360,6 +390,52 @@ std::vector<Bar> FeatureExtractor::get_bars() const {
     return history_.to_vector();
 }
 
+FeatureExtractor::BollingerBands FeatureExtractor::calculate_bollinger_bands(
+    const std::vector<Price>& prices, int period, double k) const {
+
+    BollingerBands bb;
+
+    if (prices.size() < static_cast<size_t>(period)) {
+        return bb;
+    }
+
+    // Calculate mean (SMA)
+    double sum = 0.0;
+    for (size_t i = prices.size() - period; i < prices.size(); ++i) {
+        sum += prices[i];
+    }
+    bb.mean = sum / period;
+
+    // Calculate standard deviation
+    double sum_sq_diff = 0.0;
+    for (size_t i = prices.size() - period; i < prices.size(); ++i) {
+        double diff = prices[i] - bb.mean;
+        sum_sq_diff += diff * diff;
+    }
+    bb.sd = std::sqrt(sum_sq_diff / period);
+
+    // Calculate bands
+    bb.upper = bb.mean + k * bb.sd;
+    bb.lower = bb.mean - k * bb.sd;
+
+    // Calculate %B (position within bands)
+    Price current = prices.back();
+    double band_width = bb.upper - bb.lower;
+    if (band_width > 1e-10) {
+        bb.percent_b = (current - bb.lower) / band_width;
+        bb.percent_b = std::clamp(bb.percent_b, 0.0, 1.0);
+    } else {
+        bb.percent_b = 0.5;
+    }
+
+    // Calculate bandwidth (normalized by price)
+    if (bb.mean > 1e-10) {
+        bb.bandwidth = band_width / bb.mean;
+    }
+
+    return bb;
+}
+
 std::vector<std::string> FeatureExtractor::get_feature_names() {
     return {
         // Time (0-7) - Cyclical encoding
@@ -379,8 +455,19 @@ std::vector<std::string> FeatureExtractor::get_feature_names() {
         "mom1_x_vol10", "mom5_x_vol10", "mom10_x_volsurge", "rsi_x_vol", "pricepos_x_direction",
         // Acceleration (28-30)
         "momentum_accel_short", "momentum_accel_long", "volatility_change",
-        // Derived (31-32)
-        "log_momentum", "bias"
+        // Derived (31)
+        "log_momentum",
+        // Mean Reversion (32-34)
+        "ma_dev_5", "ma_dev_10", "ma_dev_20",
+        // Bollinger Bands (35-40)
+        "bb20_mean_dev", "bb20_sd_pct", "bb20_upper_dev", "bb20_lower_dev", "bb20_percent_b", "bb20_bandwidth",
+        // Bias (41)
+        "bias",
+        // Regime Features (42-53)
+        "regime_hmm_state_0", "regime_hmm_state_1", "regime_hmm_state_2",
+        "regime_vol_low", "regime_vol_med", "regime_vol_high",
+        "regime_hmm_duration", "regime_vol_duration",
+        "regime_vol_ratio", "regime_vol_zscore", "regime_price_vol_corr", "regime_volume_zscore"
     };
 }
 

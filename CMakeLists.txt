@@ -48,8 +48,9 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 set(CORE_SOURCES
     # Predictor components (robust online learning)
     src/predictor/ewrls_predictor.cpp          # Core EWRLS with numerical stability
-    src/predictor/online_predictor.cpp         # Wrapper for 33-feature enforcement
-    src/predictor/feature_extractor.cpp        # 33-feature extractor (8 time + 25 technical)
+    src/predictor/online_predictor.cpp         # Wrapper for 54-feature enforcement
+    src/predictor/feature_extractor.cpp        # 54-feature extractor (8 time + 34 technical + 12 regime)
+    src/predictor/regime_features.cpp          # Fast regime detection (k-means clustering)
     src/predictor/multi_horizon_predictor.cpp  # Multi-horizon prediction (1, 5, 10 bars)
 
     # Features (backward compatibility wrapper)

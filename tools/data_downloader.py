@@ -65,36 +65,69 @@ def fetch_aggs_all(symbol, start_date, end_date, api_key, timespan="minute", mul
 
 def filter_and_prepare_data(df):
     """
-    Filters a DataFrame of market data for RTH (Regular Trading Hours)
-    and removes US market holidays.
+    Filters a DataFrame of market data for RTH (Regular Trading Hours),
+    removes US market holidays, and forward-fills missing bars to ensure
+    perfect 391-bar alignment (9:30 AM to 4:00 PM ET, one bar per minute).
     """
     if df is None or df.empty:
         return None
 
     print("Filtering data for RTH and US market holidays...")
-    
+
     # 1. Convert UTC millisecond timestamp to a timezone-aware DatetimeIndex
     df['timestamp_utc_ms'] = pd.to_datetime(df['timestamp_utc_ms'], unit='ms', utc=True)
     df.set_index('timestamp_utc_ms', inplace=True)
-    
+
     # 2. Convert the index to New York time to perform RTH and holiday checks
     df.index = df.index.tz_convert(NY_TIMEZONE)
-    
-    # 3. Filter for Regular Trading Hours
+
+    # 3. Filter for Regular Trading Hours (9:30 AM to 4:00 PM)
     df = df.between_time(RTH_START, RTH_END)
 
     # 4. Filter out US market holidays
     nyse = mcal.get_calendar('NYSE')
-    holidays = nyse.holidays().holidays # Get a list of holiday dates
+    holidays = nyse.holidays().holidays
     df = df[~df.index.normalize().isin(holidays)]
-    
+
     print(f" -> {len(df)} bars remaining after filtering.")
-    
-    # 5. Add the specific columns required by the C++ backtester
-    df['ts_utc'] = df.index.strftime('%Y-%m-%dT%H:%M:%S%z').str.replace(r'([+-])(\d{2})(\d{2})', r'\1\2:\3', regex=True)
-    df['ts_nyt_epoch'] = df.index.astype('int64') // 10**9
-    
-    return df
+
+    # 5. Create perfect 391-bar grid for each trading day
+    print("Creating perfect 391-bar alignment with forward-fill...")
+
+    # Get unique trading days
+    trading_days = df.index.normalize().unique()
+
+    # Create complete time grid (391 bars per day: 9:30 to 16:00 = 390 minutes + 1 initial bar)
+    complete_index = pd.DatetimeIndex([])
+    for day in trading_days:
+        day_start = day.replace(hour=9, minute=30, second=0, microsecond=0)
+        day_end = day.replace(hour=16, minute=0, second=0, microsecond=0)
+        day_range = pd.date_range(start=day_start, end=day_end, freq='1min', tz=NY_TIMEZONE)
+        complete_index = complete_index.append(day_range)
+
+    # Reindex to complete grid and forward-fill missing bars
+    df_aligned = df.reindex(complete_index, method='ffill')
+
+    # For any remaining NaN at start of days (before first real bar), backfill
+    df_aligned = df_aligned.fillna(method='bfill')
+
+    # Verify each day has exactly 391 bars
+    bars_per_day = df_aligned.groupby(df_aligned.index.date).size()
+    expected_bars = 391
+
+    for date, count in bars_per_day.items():
+        if count != expected_bars:
+            print(f"   WARNING: {date} has {count} bars (expected {expected_bars})")
+        else:
+            print(f"   ✓ {date}: {count} bars (perfect alignment)", end="\r")
+
+    print(f"\n -> Final aligned dataset: {len(df_aligned)} bars ({len(trading_days)} days × 391 bars)")
+
+    # 6. Add the specific columns required by the C++ backtester
+    df_aligned['ts_utc'] = df_aligned.index.strftime('%Y-%m-%dT%H:%M:%S%z').str.replace(r'([+-])(\d{2})(\d{2})', r'\1\2:\3', regex=True)
+    df_aligned['ts_nyt_epoch'] = df_aligned.index.astype('int64') // 10**9
+
+    return df_aligned
 
 def save_to_bin(df, path):
     """

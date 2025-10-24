@@ -1,6 +1,7 @@
 #pragma once
 #include "core/bar.h"
 #include "utils/circular_buffer.h"
+#include "predictor/regime_features.h"
 #include <Eigen/Dense>
 #include <optional>
 #include <array>
@@ -8,7 +9,7 @@
 namespace trading {
 
 /**
- * Enhanced Feature Extractor - 36 Technical + Time Indicators
+ * Enhanced Feature Extractor - 54 Features (42 Technical + 12 Regime)
  *
  * Extracts comprehensive set of proven technical indicators for online learning:
  * - 8 Time features (cyclical encoding: hour, minute, day-of-week, day-of-month)
@@ -19,6 +20,8 @@ namespace trading {
  * - Trend strength (RSI-like, directional momentum)
  * - Interaction terms (momentum * volatility, etc.)
  * - Mean reversion indicators (deviation from MA at 5, 10, 20 periods)
+ * - Bollinger Bands (6 features)
+ * - Regime features (12 features: HMM states, vol regimes, microstructure)
  *
  * Optimized for:
  * - O(1) incremental updates via CircularBuffer
@@ -29,7 +32,7 @@ class FeatureExtractor {
 public:
     // Public constants for feature dimensions
     static constexpr size_t LOOKBACK = 50;      // Lookback window size
-    static constexpr size_t NUM_FEATURES = 36;  // 8 time + 28 technical features
+    static constexpr size_t NUM_FEATURES = 54;  // 8 time + 28 technical + 6 BB + 12 regime
 
     FeatureExtractor();
 
@@ -74,6 +77,9 @@ private:
     double prev_close_;
     size_t bar_count_;
 
+    // Regime feature extractor
+    RegimeFeatures regime_features_;
+
     // Time feature calculations (cyclical encoding)
     void calculate_time_features(Timestamp timestamp, Eigen::VectorXd& features, int& idx) const;
 
@@ -90,6 +96,17 @@ private:
 
     // Mean reversion features
     double calculate_ma_deviation(const std::vector<Price>& prices, int period) const;
+
+    // Bollinger Bands features
+    struct BollingerBands {
+        double mean = 0.0;
+        double sd = 0.0;
+        double upper = 0.0;
+        double lower = 0.0;
+        double percent_b = 0.5;
+        double bandwidth = 0.0;
+    };
+    BollingerBands calculate_bollinger_bands(const std::vector<Price>& prices, int period = 20, double k = 2.0) const;
 
     // Utility helpers
     std::vector<Price> get_closes() const;
