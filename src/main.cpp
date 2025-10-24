@@ -218,6 +218,15 @@ bool parse_args(int argc, char* argv[], Config& config) {
             config.trading.strategy = StrategyType::SIGOR;
             std::cout << "\n📊 SIGOR Strategy Configuration Loaded\n";
             trading::SigorConfigLoader::print_config(config.trading.sigor_config, "config/sigor_params.json");
+
+            // CRITICAL: SIGOR is rule-based and does not require warmup/simulation
+            // Disable day-based warmup to avoid consuming morning bars on the test day
+            config.warmup_bars_specified = 0;        // No prev-day warmup
+            config.intraday_warmup = true;           // Any warmup (if set later) comes from test day
+            config.trading.min_bars_to_learn = 0;    // Start trading immediately
+            config.trading.warmup.enabled = false;   // Disable warmup phases entirely
+            config.trading.warmup.observation_days = 0;
+            config.trading.warmup.simulation_days = 0;
         } else {
             // Default EWRLS
             config.trading = trading::ConfigLoader::load("config/trading_params.json");

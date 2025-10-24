@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 import pytz
 import struct
+import bisect
 
 def utc_ms_to_et_string(timestamp_ms, fmt='%Y-%m-%d %H:%M'):
     """Convert UTC millisecond timestamp to ET timezone string"""
@@ -847,45 +848,46 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
         # Load price data and generate chart script
         price_data = load_price_data(symbol, data_dir)
         if price_data is not None:
-            # Ensure timestamp column is datetimelike for .dt accessors
+            # Ensure timestamp column is datetimelike (UTC), then derive ET view for all downstream logic
             if 'timestamp' in price_data.columns:
                 price_data['timestamp'] = pd.to_datetime(price_data['timestamp'], utc=True, errors='coerce')
                 price_data = price_data.dropna(subset=['timestamp'])
-            # Filter to only the test date range
+                price_data['timestamp_et'] = price_data['timestamp'].dt.tz_convert('America/New_York')
+
+            # Filter to only the test date range (ET dates)
             if start_date and end_date:
-                price_data['date'] = price_data['timestamp'].dt.strftime('%Y-%m-%d')
-                # Filter to include both start_date and end_date
-                price_data = price_data[(price_data['date'] >= start_date) & (price_data['date'] <= end_date)]
+                price_data['date_et'] = price_data['timestamp_et'].dt.strftime('%Y-%m-%d')
+                price_data = price_data[(price_data['date_et'] >= start_date) & (price_data['date_et'] <= end_date)]
             elif len(symbol_trades) > 0:
-                # Fallback: use first trade timestamp
+                # Fallback: use first trade ET date
                 first_trade_ts = symbol_trades[0].get('timestamp_ms', 0)
                 test_date_str = utc_ms_to_et_string(first_trade_ts, fmt='%Y-%m-%d')
-                price_data['date'] = price_data['timestamp'].dt.strftime('%Y-%m-%d')
-                price_data = price_data[price_data['date'] == test_date_str]
+                price_data['date_et'] = price_data['timestamp_et'].dt.strftime('%Y-%m-%d')
+                price_data = price_data[price_data['date_et'] == test_date_str]
             else:
                 # Fallback: use last 390 bars if no trades
                 price_data = price_data.tail(390)
 
-            # CRITICAL: Filter to ONLY regular trading hours (9:30 AM - 4:00 PM ET) and weekdays
-            price_data['hour'] = price_data['timestamp'].dt.hour
-            price_data['minute'] = price_data['timestamp'].dt.minute
-            price_data['weekday'] = price_data['timestamp'].dt.weekday  # 0=Monday, 6=Sunday
+            # CRITICAL: Filter to ONLY regular trading hours (9:30 AM - 4:00 PM ET) and weekdays, using ET clock
+            price_data['hour_et'] = price_data['timestamp_et'].dt.hour
+            price_data['minute_et'] = price_data['timestamp_et'].dt.minute
+            price_data['weekday_et'] = price_data['timestamp_et'].dt.weekday  # 0=Monday, 6=Sunday
 
             # Keep only RTH: 9:30 AM to 4:00 PM ET, Monday-Friday
             price_data = price_data[
-                (price_data['weekday'] < 5) &  # Monday to Friday only
+                (price_data['weekday_et'] < 5) &
                 (
-                    ((price_data['hour'] == 9) & (price_data['minute'] >= 30)) |  # 9:30 AM onwards
-                    ((price_data['hour'] >= 10) & (price_data['hour'] < 16)) |    # 10 AM to 3:59 PM
-                    ((price_data['hour'] == 16) & (price_data['minute'] == 0))    # Up to 4:00 PM
+                    ((price_data['hour_et'] == 9) & (price_data['minute_et'] >= 30)) |
+                    ((price_data['hour_et'] >= 10) & (price_data['hour_et'] < 16)) |
+                    ((price_data['hour_et'] == 16) & (price_data['minute_et'] == 0))
                 )
             ].copy()
 
             # Create sequential bar numbers for continuous x-axis (no gaps)
             price_data['bar_num'] = range(len(price_data))
 
-            # Create readable timestamps for hover
-            timestamps_str = price_data['timestamp'].dt.strftime('%Y-%m-%d %H:%M').tolist()
+            # Create readable timestamps for hover (ET)
+            timestamps_str = price_data['timestamp_et'].dt.strftime('%Y-%m-%d %H:%M').tolist()
             bar_numbers = price_data['bar_num'].tolist()
             prices = price_data['close'].tolist()
 
@@ -894,7 +896,7 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
             ticktext = []
             prev_date = None
             for idx, row in price_data.iterrows():
-                current_date = row['timestamp'].strftime('%Y-%m-%d')
+                current_date = row['timestamp_et'].strftime('%Y-%m-%d')
                 if current_date != prev_date:
                     tickvals.append(row['bar_num'])
                     ticktext.append(current_date)
@@ -903,11 +905,44 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
             # Get entry and exit points - map to bar numbers
             # Create a mapping from timestamp (ET minute) to bar number to match trade timestamps
             ts_to_bar = {}
+            # Also build a sorted list of UTC millisecond timestamps for nearest-neighbor snapping
+            bar_ms_list = []
+            bar_num_list = []
             for idx, row in price_data.iterrows():
-                # Convert UTC bar timestamp to ET string at minute precision
-                bar_ms = int(row['timestamp'].timestamp() * 1000)
+                # Convert bar timestamp (ET) to ET string at minute precision
+                bar_ms = int(row['timestamp_et'].timestamp() * 1000)
                 ts_str = utc_ms_to_et_string(bar_ms)
                 ts_to_bar[ts_str] = row['bar_num']
+                bar_ms_list.append(bar_ms)
+                bar_num_list.append(row['bar_num'])
+
+            # Ensure the lists are sorted by timestamp for bisect operations
+            # price_data is already chronological, but we guard against accidental disorder
+            if bar_ms_list and any(bar_ms_list[i] > bar_ms_list[i+1] for i in range(len(bar_ms_list)-1)):
+                combined = sorted(zip(bar_ms_list, bar_num_list))
+                bar_ms_list = [c[0] for c in combined]
+                bar_num_list = [c[1] for c in combined]
+
+            def snap_to_nearest_bar(trade_ms_utc: int, max_delta_ms: int = 60000):
+                """Return bar_num nearest to trade_ms_utc within ±max_delta_ms, else None."""
+                if not bar_ms_list:
+                    return None
+                idx = bisect.bisect_left(bar_ms_list, trade_ms_utc)
+                candidates = []
+                if idx < len(bar_ms_list):
+                    candidates.append(idx)
+                if idx > 0:
+                    candidates.append(idx - 1)
+                best_bar = None
+                best_delta = None
+                for c in candidates:
+                    delta = abs(bar_ms_list[c] - trade_ms_utc)
+                    if best_delta is None or delta < best_delta:
+                        best_delta = delta
+                        best_bar = bar_num_list[c]
+                if best_delta is not None and best_delta <= max_delta_ms:
+                    return best_bar
+                return None
 
             entries = []  # (bar_num, price, timestamp_str)
             for t in symbol_trades:
@@ -915,15 +950,13 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
                     ts_str = utc_ms_to_et_string(t['timestamp_ms'])
                     trade_date = utc_ms_to_et_string(t['timestamp_ms'], fmt='%Y-%m-%d')
                     # Only include if within date range
-                    if start_date and end_date:
-                        if start_date <= trade_date <= end_date:
-                            bar_num = ts_to_bar.get(ts_str)
-                            if bar_num is not None:
-                                entries.append((bar_num, t['price'], ts_str))
-                    else:
-                        bar_num = ts_to_bar.get(ts_str)
-                        if bar_num is not None:
-                            entries.append((bar_num, t['price'], ts_str))
+                    if start_date and end_date and not (start_date <= trade_date <= end_date):
+                        continue
+                    bar_num = ts_to_bar.get(ts_str)
+                    if bar_num is None:
+                        bar_num = snap_to_nearest_bar(t['timestamp_ms'])
+                    if bar_num is not None:
+                        entries.append((bar_num, t['price'], ts_str))
 
             exits = []  # (bar_num, price, timestamp_str)
             for t in symbol_trades:
@@ -931,15 +964,13 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
                     ts_str = utc_ms_to_et_string(t['timestamp_ms'])
                     trade_date = utc_ms_to_et_string(t['timestamp_ms'], fmt='%Y-%m-%d')
                     # Only include if within date range
-                    if start_date and end_date:
-                        if start_date <= trade_date <= end_date:
-                            bar_num = ts_to_bar.get(ts_str)
-                            if bar_num is not None:
-                                exits.append((bar_num, t['price'], ts_str))
-                    else:
-                        bar_num = ts_to_bar.get(ts_str)
-                        if bar_num is not None:
-                            exits.append((bar_num, t['price'], ts_str))
+                    if start_date and end_date and not (start_date <= trade_date <= end_date):
+                        continue
+                    bar_num = ts_to_bar.get(ts_str)
+                    if bar_num is None:
+                        bar_num = snap_to_nearest_bar(t['timestamp_ms'])
+                    if bar_num is not None:
+                        exits.append((bar_num, t['price'], ts_str))
 
             html += f"""
     <script>

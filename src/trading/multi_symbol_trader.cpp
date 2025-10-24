@@ -74,7 +74,13 @@ MultiSymbolTrader::MultiSymbolTrader(const std::vector<Symbol>& symbols,
       daily_losing_trades_(0) {
 
     // Calculate when test day begins (after warmup observation + simulation)
-    if (config_.warmup.enabled) {
+    if (config_.strategy == StrategyType::SIGOR) {
+        // SIGOR is rule-based; treat everything as live trading immediately
+        config_.warmup.enabled = false;
+        config_.warmup.observation_days = 0;
+        config_.warmup.simulation_days = 0;
+        test_day_start_bar_ = 0;
+    } else if (config_.warmup.enabled) {
         test_day_start_bar_ = (config_.warmup.observation_days + config_.warmup.simulation_days)
                             * config_.bars_per_day;
     }
@@ -354,19 +360,24 @@ void MultiSymbolTrader::on_bar(const std::unordered_map<Symbol, Bar>& market_dat
     // Step 6b: Update rotation cooldowns (from online_trader)
     update_rotation_cooldowns();
 
-    switch(config_.current_phase) {
-        case TradingConfig::WARMUP_OBSERVATION:
-            handle_observation_phase(market_data);
-            break;
+    if (config_.strategy == StrategyType::SIGOR) {
+        // Always trade immediately for SIGOR
+        handle_live_phase(predictions, market_data);
+    } else {
+        switch(config_.current_phase) {
+            case TradingConfig::WARMUP_OBSERVATION:
+                handle_observation_phase(market_data);
+                break;
 
-        case TradingConfig::WARMUP_SIMULATION:
-            handle_simulation_phase(predictions, market_data);
-            break;
+            case TradingConfig::WARMUP_SIMULATION:
+                handle_simulation_phase(predictions, market_data);
+                break;
 
-        case TradingConfig::WARMUP_COMPLETE:
-        case TradingConfig::LIVE_TRADING:
-            handle_live_phase(predictions, market_data);
-            break;
+            case TradingConfig::WARMUP_COMPLETE:
+            case TradingConfig::LIVE_TRADING:
+                handle_live_phase(predictions, market_data);
+                break;
+        }
     }
 
     // Step 7: EOD liquidation (use timestamp-based detection)

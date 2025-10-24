@@ -171,7 +171,7 @@ struct TradingConfig {
         WARMUP_COMPLETE,      // Warmup done, ready for live
         LIVE_TRADING          // Actually trading
     };
-    Phase current_phase = LIVE_TRADING;  // Default to live (warmup disabled)
+    Phase current_phase = LIVE_TRADING;  // Default to live (warmup disabled); SIGOR forces LIVE
 
     TradingConfig() {
         // Set reasonable defaults for multi-horizon (RESPONSIVE for minute-bar mean reversion)
