@@ -9,7 +9,7 @@ for consumption by the C++ rotation trading system.
 Why Polygon instead of Alpaca IEX:
 - Polygon aggregates data from ALL US exchanges (~100% coverage)
 - Alpaca IEX only covers IEX exchange (~2-3% of volume)
-- Critical for low-volume symbols like ERX, FAS, FAZ, ERY
+- Critical for leveraged ETFs with lower volume
 """
 
 import os
@@ -18,17 +18,23 @@ import json
 import time
 import signal
 import websocket
+import ssl
+import certifi
 from datetime import datetime
 import threading
 
 # FIFO pipe path for C++ communication
 FIFO_PATH = "/tmp/alpaca_bars.fifo"  # Keep same path for compatibility
+fifo_file = None  # Keep FIFO open to prevent EOF on reader
 
-# Rotation trading symbols (12 instruments)
+# SIGOR Standard 12-Symbol Universe
 SYMBOLS = [
-    'ERX', 'ERY', 'FAS', 'FAZ',
-    'SDS', 'SSO', 'SQQQ', 'SVXY',
-    'TNA', 'TQQQ', 'TZA', 'UVXY'
+    'TQQQ', 'SQQQ',  # Nasdaq 3x long/short
+    'TNA', 'TZA',    # Russell 2000 3x long/short
+    'UVXY', 'SVXY',  # VIX 1.5x long / 0.5x short
+    'FAS', 'FAZ',    # Financials 3x long/short
+    'SSO', 'SDS',    # S&P 500 2x long/short
+    'SOXL', 'SOXS'   # Semiconductors 3x long/short
 ]
 
 # Track connection health
@@ -51,11 +57,9 @@ def signal_handler(sig, frame):
 
 def create_fifo():
     """Create named pipe (FIFO) if it doesn't exist"""
-    if os.path.exists(FIFO_PATH):
-        os.remove(FIFO_PATH)
-
-    os.mkfifo(FIFO_PATH)
-    print(f"[BRIDGE] Created FIFO pipe: {FIFO_PATH}")
+    if not os.path.exists(FIFO_PATH):
+        os.mkfifo(FIFO_PATH)
+        print(f"[BRIDGE] Created FIFO pipe: {FIFO_PATH}")
 
 
 def on_message(ws, message):
@@ -126,15 +130,22 @@ def on_message(ws, message):
                           f"C:{bar_data['close']:7.2f} V:{bar_data['volume']:8d} "
                           f"(#{bar_counts[symbol]:3d})", flush=True)
 
-                    # Send bar to FIFO
+                    # Send bar to FIFO (keep FD open)
+                    global fifo_file
                     try:
-                        with open(FIFO_PATH, 'w') as fifo:
-                            json.dump(bar_data, fifo)
-                            fifo.write('\n')
-                            fifo.flush()
+                        if fifo_file is None or fifo_file.closed:
+                            fifo_file = open(FIFO_PATH, 'w')
+                        json.dump(bar_data, fifo_file)
+                        fifo_file.write('\n')
+                        fifo_file.flush()
+                    except BrokenPipeError:
+                        try:
+                            fifo_file.close()
+                        except Exception:
+                            pass
+                        fifo_file = None
                     except Exception as e:
-                        # If C++ not reading, skip (don't block)
-                        pass
+                        print(f"[BRIDGE] ❌ FIFO write error: {e}", file=sys.stderr, flush=True)
 
                     last_bar_time = time.time()
 
@@ -220,6 +231,10 @@ def main():
     print(f"[BRIDGE] Symbols: {', '.join(SYMBOLS)}")
     print()
 
+    # Configure SSL CA certs explicitly
+    os.environ['SSL_CERT_FILE'] = certifi.where()
+    os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+
     # Create WebSocket connection with auto-reconnect
     while running:
         try:
@@ -238,7 +253,10 @@ def main():
             print()
 
             # Run WebSocket (blocks until closed)
-            ws.run_forever()
+            ws.run_forever(sslopt={
+                'cert_reqs': ssl.CERT_REQUIRED,
+                'ca_certs': certifi.where()
+            })
 
             if not running:
                 break

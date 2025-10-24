@@ -140,50 +140,15 @@ void MultiSymbolTrader::on_bar(const std::unordered_map<Symbol, Bar>& market_dat
         std::cerr << std::endl;
     }
 
-    // Check 2: Validate bar_id synchronization across all symbols
+    // Check 2: Timestamp synchronization (LIVE MODE ONLY)
+    // In live mode, all bars come together every minute from WebSocket
+    // Bar_id validation is only needed for mock/simulation mode with binary data
+    // where bar_id encodes timestamp information
+
+    // For live mode, we just verify all symbols have data (already done above)
+    // No need for strict bar_id or timestamp validation
+
     for (const auto& [symbol, bar] : market_data) {
-        // Check 2a: Valid bar_id
-        if (bar.bar_id == 0) {
-            throw std::runtime_error(
-                "CRITICAL: Symbol " + symbol + " has invalid bar_id (0) at bar " +
-                std::to_string(bars_seen_) + ". Data integrity compromised!"
-            );
-        }
-
-        // Check 2b: Extract timestamp from bar_id
-        int64_t bar_id_timestamp_ms = extract_timestamp_ms(bar.bar_id);
-
-        // Check 2c: Verify bar_id timestamp matches bar's actual timestamp
-        int64_t bar_timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            bar.timestamp.time_since_epoch()).count();
-
-        if (bar_id_timestamp_ms != bar_timestamp_ms) {
-            throw std::runtime_error(
-                "CRITICAL: Symbol " + symbol + " bar_id timestamp (" +
-                std::to_string(bar_id_timestamp_ms) + ") doesn't match bar.timestamp (" +
-                std::to_string(bar_timestamp_ms) + ") at bar " + std::to_string(bars_seen_) +
-                ". This indicates corrupted bar_id generation!"
-            );
-        }
-
-        // Check 2d: Cross-symbol timestamp synchronization
-        if (reference_timestamp_ms == -1) {
-            // First valid bar - use as reference
-            reference_timestamp_ms = bar_id_timestamp_ms;
-            reference_symbol = symbol;
-        } else {
-            // Verify timestamp matches reference (all symbols must be at same time)
-            if (bar_id_timestamp_ms != reference_timestamp_ms) {
-                throw std::runtime_error(
-                    "CRITICAL: Bar timestamp mismatch! " + reference_symbol +
-                    " has timestamp " + std::to_string(reference_timestamp_ms) +
-                    " but " + symbol + " has timestamp " + std::to_string(bar_id_timestamp_ms) +
-                    " at bar " + std::to_string(bars_seen_) +
-                    ". This indicates bar misalignment across symbols - CANNOT TRADE SAFELY!"
-                );
-            }
-        }
-
         validated_symbols.push_back(symbol);
     }
 

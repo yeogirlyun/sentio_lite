@@ -41,6 +41,7 @@ find_package(Threads REQUIRED)
 # Include Directories
 # ============================================================================
 include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(${CMAKE_SOURCE_DIR}/external/nlohmann_json/include)
 
 # ============================================================================
 # Source Files - CORRECTED AND VALIDATED

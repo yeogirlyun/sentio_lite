@@ -27,12 +27,16 @@ os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
 
 # FIFO pipe path for C++ communication
 FIFO_PATH = "/tmp/alpaca_bars.fifo"
+fifo_file = None  # Keep FIFO open to avoid EOF on reader
 
-# Rotation trading symbols (12 instruments)
+# SIGOR Standard 12-Symbol Universe
 SYMBOLS = [
-    'ERX', 'ERY', 'FAS', 'FAZ',
-    'SDS', 'SSO', 'SQQQ', 'SVXY',
-    'TNA', 'TQQQ', 'TZA', 'UVXY'
+    'TQQQ', 'SQQQ',  # Nasdaq 3x long/short
+    'TNA', 'TZA',    # Russell 2000 3x long/short
+    'UVXY', 'SVXY',  # VIX 1.5x long / 0.5x short
+    'FAS', 'FAZ',    # Financials 3x long/short
+    'SSO', 'SDS',    # S&P 500 2x long/short
+    'SOXL', 'SOXS'   # Semiconductors 3x long/short
 ]
 
 # Track connection health
@@ -52,11 +56,10 @@ def signal_handler(sig, frame):
 
 def create_fifo():
     """Create named pipe (FIFO) if it doesn't exist"""
-    if os.path.exists(FIFO_PATH):
-        os.remove(FIFO_PATH)
-
-    os.mkfifo(FIFO_PATH)
-    print(f"[BRIDGE] Created FIFO pipe: {FIFO_PATH}")
+    # Create if missing; don't remove an existing FIFO that's possibly in use
+    if not os.path.exists(FIFO_PATH):
+        os.mkfifo(FIFO_PATH)
+        print(f"[BRIDGE] Created FIFO pipe: {FIFO_PATH}")
 
 
 async def bar_handler(bar: Bar):
@@ -90,15 +93,25 @@ async def bar_handler(bar: Bar):
         print(f"[BRIDGE] ✓ {bar.symbol:5s} @ {timestamp_str} | "
               f"C:{bar.close:7.2f} V:{int(bar.volume):8d} (#{bar_counts[bar.symbol]:3d})", flush=True)
 
-        # Send bar to FIFO
+        # Send bar to FIFO (keep FD open to prevent EOF on the reader)
+        global fifo_file
         try:
-            with open(FIFO_PATH, 'w') as fifo:
-                json.dump(bar_data, fifo)
-                fifo.write('\n')
-                fifo.flush()
+            if fifo_file is None or fifo_file.closed:
+                # Open for write; this will block until a reader opens
+                fifo_file = open(FIFO_PATH, 'w')
+            json.dump(bar_data, fifo_file)
+            fifo_file.write('\n')
+            fifo_file.flush()
+        except BrokenPipeError:
+            # Reader disappeared; close and retry next bar
+            try:
+                fifo_file.close()
+            except Exception:
+                pass
+            fifo_file = None
         except Exception as e:
-            # If C++ not reading, skip (don't block)
-            pass
+            # Log but continue
+            print(f"[BRIDGE] ❌ FIFO write error: {e}", file=sys.stderr, flush=True)
 
         last_bar_time = time.time()
 
