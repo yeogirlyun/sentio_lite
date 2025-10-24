@@ -7,6 +7,7 @@
 #include <cmath>
 #include <ctime>
 #include <map>
+#include <set>
 
 /**
  * Calculate simple moving average from price history
@@ -63,36 +64,50 @@ MultiSymbolTrader::MultiSymbolTrader(const std::vector<Symbol>& symbols,
       cash_(config.initial_capital),
       bars_seen_(0),
       trading_bars_(0),
+      test_day_start_bar_(0),
       total_trades_(0),
       total_transaction_costs_(0.0),
+      current_min_prediction_(config.min_prediction_for_entry),
       daily_start_equity_(config.initial_capital),
       daily_start_trades_(0),
       daily_winning_trades_(0),
       daily_losing_trades_(0) {
 
+    // Calculate when test day begins (after warmup observation + simulation)
+    if (config_.warmup.enabled) {
+        test_day_start_bar_ = (config_.warmup.observation_days + config_.warmup.simulation_days)
+                            * config_.bars_per_day;
+    }
+
     // Initialize trade filter
     trade_filter_ = std::make_unique<TradeFilter>(config_.filter_config);
 
-    // Initialize per-symbol components
+    // Initialize per-symbol components based on strategy
     for (const auto& symbol : symbols_) {
-        // Multi-horizon predictor (1, 5, 10 bars ahead)
-        predictors_[symbol] = std::make_unique<MultiHorizonPredictor>(
-            symbol, config_.horizon_config);
+        if (config_.strategy == StrategyType::EWRLS) {
+            // Multi-horizon EWRLS predictor (1, 5, 10 bars ahead)
+            predictors_[symbol] = std::make_unique<MultiHorizonPredictor>(
+                symbol, config_.horizon_config);
 
-        // Feature extractor with 50-bar lookback
-        extractors_[symbol] = std::make_unique<FeatureExtractor>();
+            // Feature extractor with 50-bar lookback (EWRLS only)
+            extractors_[symbol] = std::make_unique<FeatureExtractor>();
+        } else if (config_.strategy == StrategyType::SIGOR) {
+            // SIGOR predictor adapter (uses bar data directly)
+            sigor_predictors_[symbol] = std::make_unique<SigorPredictorAdapter>(
+                symbol, config_.sigor_config);
+        }
 
-        // Trade history for adaptive sizing
+        // Trade history for adaptive sizing (both strategies)
         trade_history_[symbol] = std::make_unique<TradeHistory>(config_.trade_history_size);
 
-        // Initialize market context with defaults
+        // Initialize market context with defaults (both strategies)
         market_context_[symbol] = MarketContext(
             config_.default_avg_volume,
             config_.default_volatility,
             30  // Default 30 minutes from open
         );
 
-        // Initialize price history for multi-bar return calculations
+        // Initialize price history for multi-bar return calculations (both strategies)
         price_history_[symbol] = std::deque<double>();
     }
 }
@@ -217,16 +232,36 @@ void MultiSymbolTrader::on_bar(const std::unordered_map<Symbol, Bar>& market_dat
         if (it == market_data.end()) continue;
 
         const Bar& bar = it->second;
-        auto features = extractors_[symbol]->extract(bar);
 
-        if (features.has_value()) {
-            // Make multi-horizon prediction
-            auto pred = predictors_[symbol]->predict(features.value());
-            predictions[symbol] = {pred, features.value(), bar.close};
+        if (config_.strategy == StrategyType::EWRLS) {
+            // EWRLS: Extract features and make prediction
+            auto features = extractors_[symbol]->extract(bar);
 
-            // Update predictor with realized returns or mean reversion targets
-            if (bars_seen_ > 1) {
+            if (features.has_value()) {
+                // Make multi-horizon prediction
+                auto pred = predictors_[symbol]->predict(features.value());
+                predictions[symbol] = {pred, features.value(), bar.close};
+            }
+        } else if (config_.strategy == StrategyType::SIGOR) {
+            // SIGOR: Update with bar and generate signal
+            sigor_predictors_[symbol]->update_with_bar(bar);
+
+            // Check if warmed up
+            if (sigor_predictors_[symbol]->is_warmed_up()) {
+                // Generate prediction (uses dummy features since SIGOR doesn't need them)
+                // Use a minimal feature vector but ensure downstream checks are safe
+                Eigen::VectorXd dummy_features = Eigen::VectorXd::Zero(1);
+                auto pred = sigor_predictors_[symbol]->predict(dummy_features);
+                predictions[symbol] = {pred, dummy_features, bar.close};
+            }
+        }
+
+        // Update EWRLS predictor with realized returns (SIGOR doesn't need this - it's rule-based)
+        if (config_.strategy == StrategyType::EWRLS && bars_seen_ > 1) {
+            auto it_pred = predictions.find(symbol);
+            if (it_pred != predictions.end()) {
                 auto& history = price_history_[symbol];
+                const auto& pred_data = it_pred->second;
 
                 double target_1bar = std::numeric_limits<double>::quiet_NaN();
                 double target_5bar = std::numeric_limits<double>::quiet_NaN();
@@ -302,7 +337,7 @@ void MultiSymbolTrader::on_bar(const std::unordered_map<Symbol, Bar>& market_dat
                 }
 
                 // Update multi-horizon predictor with targets
-                predictors_[symbol]->update(features.value(), target_1bar, target_5bar, target_10bar);
+                predictors_[symbol]->update(pred_data.features, target_1bar, target_5bar, target_10bar);
             }
         }
     }
@@ -426,6 +461,9 @@ void MultiSymbolTrader::on_bar(const std::unordered_map<Symbol, Bar>& market_dat
 void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionData>& predictions,
                                     const std::unordered_map<Symbol, Bar>& market_data) {
 
+    // Track if we enter a trade this bar (for adaptive threshold adjustment)
+    bool trade_entered_this_bar = false;
+
     // Enhanced Debug: Detailed trade analysis (every 50 bars when no positions)
     static size_t debug_counter = 0;
     if (positions_.empty() && bars_seen_ % 50 == 0) {
@@ -476,11 +514,48 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
         }
     }
 
+    // Define inverse ETF pairs (same as in is_position_compatible)
+    static const std::map<std::string, std::string> inverse_pairs = {
+        {"TQQQ", "SQQQ"}, {"SQQQ", "TQQQ"},
+        {"TNA", "TZA"}, {"TZA", "TNA"},
+        {"SOXL", "SOXS"}, {"SOXS", "SOXL"},
+        {"SSO", "SDS"}, {"SDS", "SSO"},
+        {"UVXY", "SVIX"}, {"SVIX", "UVXY"},
+        {"ERX", "ERY"}, {"ERY", "ERX"},
+        {"FAS", "FAZ"}, {"FAZ", "FAS"},
+        {"SPXL", "SPXS"}, {"SPXS", "SPXL"}
+    };
+
     // Rank symbols by 5-bar predicted return (absolute value for rotation)
+    // BUT: if prediction is negative, substitute the inverse ETF instead
     std::vector<std::pair<Symbol, double>> ranked;
+    std::set<std::string> processed_bases;  // Track base symbols to avoid duplicates
+
     for (const auto& [symbol, pred] : predictions) {
-        // Use ABSOLUTE VALUE of 5-bar prediction for ranking (strongest signals first)
-        ranked.emplace_back(symbol, std::abs(pred.prediction.pred_5bar.prediction));
+        double prediction = pred.prediction.pred_5bar.prediction;
+        Symbol tradeable_symbol = symbol;
+
+        // If prediction is negative AND symbol has an inverse pair, use the inverse instead
+        if (prediction < 0) {
+            auto inverse_it = inverse_pairs.find(symbol);
+            if (inverse_it != inverse_pairs.end()) {
+                tradeable_symbol = inverse_it->second;
+                // Flip the prediction sign since we're trading the inverse
+                prediction = -prediction;
+            }
+        }
+
+        // Track base symbols (e.g., if we processed TQQQ, skip SQQQ)
+        std::string base_key = (tradeable_symbol < symbol) ? tradeable_symbol : symbol;
+        if (processed_bases.count(base_key)) {
+            continue;  // Already processed this pair
+        }
+        processed_bases.insert(base_key);
+
+        // Only add if prediction is positive (after potential inversion)
+        if (prediction > 0) {
+            ranked.emplace_back(tradeable_symbol, prediction);
+        }
     }
 
     std::sort(ranked.begin(), ranked.end(),
@@ -495,21 +570,30 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
         }
 
         const auto& symbol = ranked[i].first;
-        const auto& pred_data = predictions.at(symbol);
 
-        // Convert prediction to probability
+        // Get prediction for this symbol (might not be in predictions if it's an inverse)
+        const PredictionData* pred_ptr = nullptr;
+        if (predictions.count(symbol)) {
+            pred_ptr = &predictions.at(symbol);
+        } else {
+            // Symbol is an inverse - skip if we don't have its prediction
+            continue;
+        }
+
+        const auto& pred_data = *pred_ptr;
+
+        // Convert prediction to probability (should always be positive after inversion logic)
         double probability = prediction_to_probability(pred_data.prediction.pred_5bar.prediction);
 
         // Apply Bollinger Band amplification if enabled
-        bool is_long = pred_data.prediction.pred_5bar.prediction > 0;
+        bool is_long = true;  // Always long after inverse substitution
         auto bar_it = market_data.find(symbol);
         if (bar_it != market_data.end()) {
             probability = apply_bb_amplification(probability, symbol, bar_it->second, is_long);
         }
 
-        // Check probability threshold (from online_trader)
-        bool passes_probability = is_long ? (probability > config_.buy_threshold)
-                                           : (probability < config_.sell_threshold);
+        // Check probability threshold (only buy threshold since we're always long)
+        bool passes_probability = (probability > config_.buy_threshold);
 
         // Also check trade filter (optional, can be disabled by setting min_prediction_for_entry = 0)
         bool passes_filter = trade_filter_->can_enter_position(
@@ -578,6 +662,9 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
                     pred_data.prediction.pred_5bar.prediction,
                     it->second.close
                 );
+
+                // Mark that a trade was entered this bar
+                trade_entered_this_bar = true;
 
                 // Log entry with multi-horizon info
                 std::cout << "  [ENTRY] " << symbol
@@ -697,6 +784,9 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
                                     entry_it->second.close
                                 );
 
+                                // Mark that a trade was entered this bar
+                                trade_entered_this_bar = true;
+
                                 std::cout << "  [ENTRY] " << candidate_symbol
                                          << " at $" << std::fixed << std::setprecision(2)
                                          << entry_it->second.close
@@ -712,6 +802,26 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
                 break;
             }
         }
+    }
+
+    // ADAPTIVE THRESHOLD ADJUSTMENT (after all trading decisions for this bar)
+    // Adjust current_min_prediction_ based on whether a trade was entered
+    if (trade_entered_this_bar) {
+        // Trade was entered: increase threshold to be more selective
+        current_min_prediction_ += config_.min_prediction_increase_on_trade;
+    } else {
+        // No trade: decrease threshold to allow more opportunities
+        current_min_prediction_ -= config_.min_prediction_decrease_on_no_trade;
+        // Lower bound: don't let it drop below 0.0
+        current_min_prediction_ = std::max(0.0, current_min_prediction_);
+    }
+
+    // Debug logging (every 50 bars)
+    if (bars_seen_ % 50 == 0) {
+        std::cout << "  [ADAPTIVE THRESHOLD] current_min_prediction: "
+                  << std::fixed << std::setprecision(4)
+                  << (current_min_prediction_ * 10000) << " bps"
+                  << " (trade this bar: " << (trade_entered_this_bar ? "YES" : "NO") << ")\n";
     }
 }
 
@@ -730,25 +840,38 @@ void MultiSymbolTrader::update_positions(
         // Get current prediction for this symbol (if available)
         auto pred_it = predictions.find(symbol);
         if (pred_it == predictions.end()) {
-            // No prediction available, use fallback logic (emergency stop loss only)
-            double pnl_pct = pos.pnl_percentage(current_price);
-            if (pnl_pct <= config_.stop_loss_pct) {
-                to_exit.push_back(symbol);
-            }
+            // No prediction available - skip (will only exit via EOD or emergency stop in trade_filter)
             continue;
         }
 
         const auto& pred_data = pred_it->second;
 
-        // Check price-based exits first (MA crossover, trailing stop)
+        // ===== PROFIT TARGET & STOP LOSS (from online_trader v2.0) =====
+        // Check P&L-based exits FIRST - highest priority
+        // This locks in profits and cuts losses quickly
+        double pnl_pct = positions_[symbol].pnl_percentage(current_price);
+
+        // Profit Target: +3% (lock in gains immediately)
+        if (config_.enable_profit_target && pnl_pct >= config_.profit_target_pct) {
+            to_exit.push_back(symbol);
+            continue;  // Exit immediately, skip other checks
+        }
+
+        // Stop Loss: -1.5% (cut losses fast - 2:1 reward:risk ratio)
+        if (config_.enable_stop_loss && pnl_pct <= -config_.stop_loss_pct) {
+            to_exit.push_back(symbol);
+            continue;  // Exit immediately, skip other checks
+        }
+
+        // Check price-based exits (MA crossover, trailing stop)
         std::string price_exit_reason;
         if (should_exit_on_price(symbol, current_price, price_exit_reason)) {
             to_exit.push_back(symbol);
             continue;  // Skip trade filter check if price-based exit triggered
         }
 
-        // Check if we should exit using trade filter
-        // This handles: emergency stops, profit targets, max hold, signal quality, etc.
+        // Check if we should exit using trade filter (signal-driven)
+        // This handles: min hold period, signal quality, etc.
         bool should_exit = trade_filter_->should_exit_position(
             symbol,
             static_cast<int>(bars_seen_),
@@ -768,18 +891,14 @@ void MultiSymbolTrader::update_positions(
             double pnl_pct = positions_[symbol].pnl_percentage(it->second.close);
             int bars_held = trade_filter_->get_bars_held(symbol);
 
-            // Determine exit reason for logging
-            std::string reason = "Unknown";
-            if (pnl_pct < config_.filter_config.emergency_stop_loss_pct) {
-                reason = "EmergencyStop";
-            } else if (pnl_pct > config_.filter_config.profit_target_multiple * 0.01) {
-                reason = "ProfitTarget";
-            } else if (bars_held >= config_.filter_config.max_bars_to_hold) {
-                reason = "MaxHold";
-            } else if (bars_held >= config_.filter_config.min_bars_to_hold) {
-                reason = "SignalExit";
+            // Determine exit reason based on P&L
+            std::string reason;
+            if (config_.enable_profit_target && pnl_pct >= config_.profit_target_pct) {
+                reason = "ProfitTarget(+3%)";
+            } else if (config_.enable_stop_loss && pnl_pct <= -config_.stop_loss_pct) {
+                reason = "StopLoss(-1.5%)";
             } else {
-                reason = "EarlyExit";
+                reason = "SignalExit";
             }
 
             exit_position(symbol, it->second.close, it->second.timestamp, it->second.bar_id);
@@ -922,24 +1041,15 @@ void MultiSymbolTrader::enter_position(const Symbol& symbol, Price price,
 
     if (shares <= 0) return;
 
-    // Calculate entry costs if enabled
-    AlpacaCostModel::TradeCosts entry_costs;
-    if (config_.enable_cost_tracking) {
-        const auto& ctx = market_context_[symbol];
-        entry_costs = AlpacaCostModel::calculate_trade_cost(
-            symbol, price, shares, true,  // is_buy = true
-            ctx.avg_daily_volume,
-            ctx.current_volatility,
-            ctx.minutes_from_open,
-            false  // is_short_sale = false
-        );
-    }
+    // NO COSTS ON ENTRY - only charge on exit (sell side)
+    // Alpaca has zero commission, and we pay SEC/TAF fees only when selling
+    AlpacaCostModel::TradeCosts entry_costs;  // Keep structure for tracking, but zero costs
 
-    double total_cost = shares * price + entry_costs.total_cost;
+    double total_cost = shares * price;  // No entry costs added
 
     if (total_cost <= cash_) {
         PositionWithCosts pos(shares, price, time, bar_id);
-        pos.entry_costs = entry_costs;
+        pos.entry_costs = entry_costs;  // Will be zero
 
         // Pre-calculate estimated exit costs
         if (config_.enable_cost_tracking) {
@@ -955,7 +1065,7 @@ void MultiSymbolTrader::enter_position(const Symbol& symbol, Price price,
 
         positions_[symbol] = pos;
         cash_ -= total_cost;
-        total_transaction_costs_ += entry_costs.total_cost;
+        // No entry costs tracked (all costs on exit only)
 
         // Initialize exit tracking for price-based exits
         if (config_.enable_price_based_exits) {
@@ -990,13 +1100,13 @@ double MultiSymbolTrader::exit_position(const Symbol& symbol, Price price, Times
 
     double proceeds = pos.shares * price - exit_costs.total_cost;
     double gross_pnl = pos.shares * (price - pos.entry_price);
-    double net_pnl = gross_pnl - pos.entry_costs.total_cost - exit_costs.total_cost;
-    double pnl_pct = net_pnl / (pos.shares * pos.entry_price + pos.entry_costs.total_cost);
+    double net_pnl = gross_pnl - exit_costs.total_cost;  // Only exit costs (entry was zero)
+    double pnl_pct = net_pnl / (pos.shares * pos.entry_price);
 
-    // Record trade for adaptive sizing (now includes bar_ids)
+    // Record trade for adaptive sizing (now includes bar_ids and exit bar index)
     // Use net_pnl for trade record
     TradeRecord trade(net_pnl, pnl_pct, pos.entry_time, time, symbol,
-                     pos.shares, pos.entry_price, price, pos.entry_bar_id, bar_id);
+                     pos.shares, pos.entry_price, price, pos.entry_bar_id, bar_id, bars_seen_);
     trade_history_[symbol]->push_back(trade);
 
     // Also add to complete trade log for export
@@ -1062,21 +1172,24 @@ double MultiSymbolTrader::get_equity(const std::unordered_map<Symbol, Bar>& mark
 MultiSymbolTrader::BacktestResults MultiSymbolTrader::get_results() const {
     BacktestResults results;
 
-    // Collect all trades across all symbols
-    std::vector<TradeRecord> all_trades;
-    for (const auto& [symbol, history] : trade_history_) {
-        for (size_t i = 0; i < history->size(); ++i) {
-            all_trades.push_back((*history)[i]);
+    // FILTER: Only collect trades from TEST DAY (after warmup + simulation)
+    // For single-day optimization, we only report metrics for the test day
+    std::vector<TradeRecord> test_day_trades;
+
+    // Use all_trades_log_ which has ALL trades with exit_bar_index
+    for (const auto& trade : all_trades_log_) {
+        if (trade.exit_bar_index >= test_day_start_bar_) {
+            test_day_trades.push_back(trade);
         }
     }
 
-    results.total_trades = total_trades_;
+    results.total_trades = test_day_trades.size();
     results.winning_trades = 0;
     results.losing_trades = 0;
     double gross_profit = 0.0;
     double gross_loss = 0.0;
 
-    for (const auto& trade : all_trades) {
+    for (const auto& trade : test_day_trades) {
         if (trade.is_win()) {
             results.winning_trades++;
             gross_profit += trade.pnl;
@@ -1114,26 +1227,31 @@ MultiSymbolTrader::BacktestResults MultiSymbolTrader::get_results() const {
                           ? (results.final_equity - config_.initial_capital) / config_.initial_capital
                           : 0.0;
 
-    // Calculate MRD using trading_bars_ (excludes warmup period)
-    double days_traded = static_cast<double>(trading_bars_) / config_.bars_per_day;
-    results.mrd = (days_traded > 0) ? results.total_return / days_traded : 0.0;
+    // Calculate MRD for TEST DAY ONLY (single day)
+    // For single-day optimization, MRD = total return (since it's just 1 day)
+    results.mrd = results.total_return;
 
     results.max_drawdown = 0.0;  // TODO: Implement drawdown tracking
 
-    // Cost tracking
-    results.total_transaction_costs = total_transaction_costs_;
+    // Cost tracking - ONLY for test day trades
+    // Note: We cannot directly filter transaction costs by bar, so we estimate
+    // based on the proportion of test day trades
+    double test_day_cost_ratio = (total_trades_ > 0)
+                                ? static_cast<double>(test_day_trades.size()) / total_trades_
+                                : 0.0;
+    results.total_transaction_costs = total_transaction_costs_ * test_day_cost_ratio;
     results.avg_cost_per_trade = (results.total_trades > 0)
-                                 ? total_transaction_costs_ / results.total_trades
+                                 ? results.total_transaction_costs / results.total_trades
                                  : 0.0;
 
-    // Calculate total volume traded
+    // Calculate total volume traded - ONLY test day trades
     double total_volume = 0.0;
-    for (const auto& trade : all_trades_log_) {
+    for (const auto& trade : test_day_trades) {
         total_volume += trade.shares * trade.entry_price;  // Entry volume
         total_volume += trade.shares * trade.exit_price;   // Exit volume
     }
     results.cost_as_pct_of_volume = (total_volume > 0)
-                                    ? (total_transaction_costs_ / total_volume) * 100.0
+                                    ? (results.total_transaction_costs / total_volume) * 100.0
                                     : 0.0;
 
     // Net return after costs
@@ -1158,8 +1276,10 @@ void MultiSymbolTrader::update_market_context(const Symbol& symbol, const Bar& b
     // Update volatility using simple rolling estimate
     // In production, use more sophisticated volatility estimation
     // For now, keep default or calculate from recent price changes
-    if (extractors_[symbol]->bar_count() >= 20) {
-        const auto& history = extractors_[symbol]->history();
+    // NOTE: Feature extractors are only available for EWRLS strategy
+    auto ext_it = extractors_.find(symbol);
+    if (ext_it != extractors_.end() && ext_it->second && ext_it->second->bar_count() >= 20) {
+        const auto& history = ext_it->second->history();
         size_t count = history.size();
         if (count >= 20) {
             // Calculate 20-bar volatility
@@ -1317,6 +1437,11 @@ int MultiSymbolTrader::check_signal_confirmations(
     }
 
     int confirmations = 0;
+
+    // If using SIGOR, features may be minimal; skip confirmations to avoid OOB
+    if (config_.strategy == StrategyType::SIGOR) {
+        return config_.min_confirmations_required;  // Treat as pass under SIGOR
+    }
 
     // === 1. RSI CONFIRMATION ===
     // Feature index 20 is RSI (from feature_extractor.cpp line 59)
@@ -1481,9 +1606,23 @@ void MultiSymbolTrader::update_phase() {
         config_.current_phase = TradingConfig::WARMUP_SIMULATION;
     }
     else {
-        // Check if we meet go-live criteria
-        if (config_.current_phase == TradingConfig::WARMUP_SIMULATION) {
-            if (evaluate_warmup_complete()) {
+        // Days complete >= observation + simulation, ready to transition to live/test
+
+        // Handle transition from OBSERVATION (when simulation_days = 0)
+        if (config_.current_phase == TradingConfig::WARMUP_OBSERVATION) {
+            if (config_.warmup.simulation_days == 0) {
+                // No simulation phase - go directly to test day
+                config_.current_phase = TradingConfig::WARMUP_COMPLETE;
+                std::cout << "\n📊 WARMUP COMPLETE (no simulation) - Proceeding directly to test day\n";
+            }
+        }
+        // Handle transition from SIMULATION (normal case)
+        else if (config_.current_phase == TradingConfig::WARMUP_SIMULATION) {
+            // Skip validation for MOCK mode (always proceed to test day)
+            if (config_.warmup.skip_validation) {
+                config_.current_phase = TradingConfig::WARMUP_COMPLETE;
+                std::cout << "\n📊 WARMUP PHASE COMPLETE - Proceeding to test day (validation skipped)\n";
+            } else if (evaluate_warmup_complete()) {
                 config_.current_phase = TradingConfig::WARMUP_COMPLETE;
                 std::cout << "\n✅ WARMUP COMPLETE - Ready for live trading\n";
                 print_warmup_summary();

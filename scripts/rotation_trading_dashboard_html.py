@@ -95,8 +95,9 @@ def load_price_data_binary(symbol, data_dir='data'):
                     break
                 volume = struct.unpack('Q', vol_bytes)[0]
 
+                # Use UTC timestamp to avoid tz ambiguities; convert later as needed
                 bars.append({
-                    'timestamp': datetime.fromtimestamp(ts_epoch),
+                    'timestamp': datetime.utcfromtimestamp(ts_epoch),
                     'open': open_price,
                     'high': high,
                     'low': low,
@@ -108,7 +109,8 @@ def load_price_data_binary(symbol, data_dir='data'):
                 return None
 
             df = pd.DataFrame(bars)
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            # Ensure datetimelike and timezone-aware to avoid .dt errors downstream (UTC)
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce')
             return df
 
     except Exception as e:
@@ -128,7 +130,14 @@ def load_price_data(symbol, data_dir='data/equities'):
         return None
 
     df = pd.read_csv(csv_path)
-    df['timestamp'] = pd.to_datetime(df['ts_utc'])
+    # Robust datetime parsing with utc awareness
+    if 'ts_utc' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['ts_utc'], utc=True, errors='coerce')
+    elif 'timestamp' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce')
+    else:
+        # Create empty timestamp column if missing to avoid attribute errors
+        df['timestamp'] = pd.NaT
     return df
 
 def generate_html_dashboard(trades_path, output_path, config_path='config/rotation_strategy.json',
@@ -140,20 +149,28 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
     print("HTML ROTATION TRADING DASHBOARD GENERATOR")
     print(f"{'='*60}")
 
-    # Load configuration
-    symbols = load_config(config_path)
-    print(f"✓ Loaded {len(symbols)} symbols from config")
-
-    # Load trading config from results.json if provided
+    # Load symbols and trading config from results.json
+    symbols = []
     trading_config = {}
     if results_path and Path(results_path).exists():
         try:
             with open(results_path, 'r') as f:
                 results_data = json.load(f)
+                # Get symbols from metadata
+                symbols_str = results_data.get('metadata', {}).get('symbols', '')
+                symbols = [s.strip() for s in symbols_str.split(',') if s.strip()]
                 trading_config = results_data.get('config', {})
+                print(f"✓ Loaded {len(symbols)} symbols from results")
                 print(f"✓ Loaded trading config from results")
         except Exception as e:
-            print(f"⚠️  Could not load config from results: {e}")
+            print(f"⚠️  Could not load from results: {e}")
+            # Fallback to config file
+            symbols = load_config(config_path)
+            print(f"✓ Loaded {len(symbols)} symbols from config (fallback)")
+    else:
+        # Fallback to config file
+        symbols = load_config(config_path)
+        print(f"✓ Loaded {len(symbols)} symbols from config")
 
     # Load trades
     print(f"\n📊 Loading trades from: {trades_path}")
@@ -225,12 +242,21 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
     # Sort symbols by P&L
     sorted_symbols = sorted(symbols, key=lambda s: performance[s]['pnl'], reverse=True)
 
-    # Calculate totals
-    total_pnl = sum(p['pnl'] for p in performance.values())
-    final_equity = start_equity + total_pnl
-    total_trades = len(trades)
-    total_return_pct = (total_pnl / start_equity * 100) if start_equity > 0 else 0
-    mrd_pct = (total_return_pct / trading_days) if trading_days > 0 else 0
+    # Calculate totals from results.json if available, otherwise from filtered trades
+    total_pnl = sum(p['pnl'] for p in performance.values())  # Always calculate for P&L display
+
+    if results_data and 'performance' in results_data:
+        # Use test-day-only metrics from results.json
+        total_trades = results_data['performance'].get('total_trades', len(trades))
+        final_equity = results_data['performance'].get('final_equity', start_equity)
+        total_return_pct = results_data['performance'].get('total_return', 0) * 100
+        mrd_pct = results_data['performance'].get('mrd', 0) * 100
+    else:
+        # Fallback: calculate from trades
+        final_equity = start_equity + total_pnl
+        total_trades = len(trades)
+        total_return_pct = (total_pnl / start_equity * 100) if start_equity > 0 else 0
+        mrd_pct = (total_return_pct / trading_days) if trading_days > 0 else 0
 
     # Symbol colors - varied for visual distinction
     colors = {
@@ -242,12 +268,13 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
     }
 
     # Start HTML
+    strategy = trading_config.get('strategy_name', 'Unknown') if trading_config else 'Unknown'
     html = f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rotation Trading Dashboard</title>
+    <title>Sentio Lite Dashboard</title>
     <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
     <style>
         * {{
@@ -427,7 +454,7 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
 
         .config-grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            grid-template-columns: repeat(4, 1fr);
             gap: 15px;
             margin-top: 20px;
         }}
@@ -453,7 +480,7 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
 </head>
 <body>
     <div class="header">
-        <h1>📊 Rotation Trading Dashboard</h1>
+        <h1>📊 Sentio Lite - {strategy} Strategy</h1>
         <p>Multi-Symbol Trading Performance Report | {start_date} to {end_date}</p>
     </div>
 
@@ -487,50 +514,66 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
 
     # Add configuration section if available
     if trading_config:
+        # Show full path for config if it's a relative path
+        import os
+        full_config_path = os.path.abspath(config_path) if config_path else "N/A"
+
+        strategy_name = trading_config.get('strategy_name', 'Unknown')
         html += f"""
-    <div class="config-section">
-        <h2 style="color: #667eea; margin-bottom: 20px;">⚙️ Trading Configuration</h2>
-        <div class="config-grid">
-            <div class="config-item">
-                <span class="config-label">Max Positions:</span>
-                <span class="config-value">{trading_config.get('max_positions', 'N/A')}</span>
+    <div class=\"config-section\">
+        <h2 style=\"color: #667eea; margin-bottom: 20px;\">⚙️ {strategy_name} Strategy Parameters</h2>
+        <p style=\"font-size: 0.95em; opacity: 0.85; margin-bottom: 10px;\"><strong>Config File:</strong> {full_config_path}</p>
+        <div class=\"config-grid\">
+"""
+
+        if strategy_name.upper().startswith('SIGOR') and 'sigor' in trading_config:
+            s = trading_config['sigor']
+            def item(label, value):
+                return f"""
+            <div class=\"config-item\">
+                <span class=\"config-label\">{label}</span>
+                <span class=\"config-value\">{value}</span>
             </div>
-            <div class="config-item">
-                <span class="config-label">Min Holding Period:</span>
-                <span class="config-value">{trading_config.get('min_bars_to_hold', 'N/A')} bars</span>
-            </div>
-            <div class="config-item">
-                <span class="config-label">Stop Loss:</span>
-                <span class="config-value">{trading_config.get('stop_loss_pct', 0) * 100:.2f}%</span>
-            </div>
-            <div class="config-item">
-                <span class="config-label">Profit Target:</span>
-                <span class="config-value">{trading_config.get('profit_target_pct', 0) * 100:.2f}%</span>
-            </div>
-            <div class="config-item">
-                <span class="config-label">Lambda (1-bar):</span>
-                <span class="config-value">{trading_config.get('lambda_1bar', 'N/A')}</span>
-            </div>
-            <div class="config-item">
-                <span class="config-label">Lambda (5-bar):</span>
-                <span class="config-value">{trading_config.get('lambda_5bar', 'N/A')}</span>
-            </div>
-            <div class="config-item">
-                <span class="config-label">Lambda (10-bar):</span>
-                <span class="config-value">{trading_config.get('lambda_10bar', 'N/A')}</span>
-            </div>
-            <div class="config-item">
-                <span class="config-label">Min Prediction for Entry:</span>
-                <span class="config-value">{trading_config.get('min_prediction_for_entry', 0) * 100:.2f}%</span>
-            </div>
-            <div class="config-item">
-                <span class="config-label">Min Bars to Learn:</span>
-                <span class="config-value">{trading_config.get('min_bars_to_learn', 'N/A')}</span>
-            </div>
-            <div class="config-item">
-                <span class="config-label">Bars per Day:</span>
-                <span class="config-value">{trading_config.get('bars_per_day', 'N/A')}</span>
-            </div>
+            """
+            html += (
+                item('k (sharpness)', s.get('k')) +
+                item('w_boll', s.get('w_boll')) +
+                item('w_rsi', s.get('w_rsi')) +
+                item('w_mom', s.get('w_mom')) +
+                item('w_vwap', s.get('w_vwap')) +
+                item('w_orb', s.get('w_orb')) +
+                item('w_ofi', s.get('w_ofi')) +
+                item('w_vol', s.get('w_vol')) +
+                item('win_boll', s.get('win_boll')) +
+                item('win_rsi', s.get('win_rsi')) +
+                item('win_mom', s.get('win_mom')) +
+                item('win_vwap', s.get('win_vwap')) +
+                item('orb_opening_bars', s.get('orb_opening_bars')) +
+                item('vol_window', s.get('vol_window')) +
+                item('warmup_bars', s.get('warmup_bars'))
+            )
+        else:
+            # Default EWRLS grid (existing parameters)
+            html += f"""
+            <div class=\"config-item\"><span class=\"config-label\">1. Max Positions</span><span class=\"config-value\">{trading_config.get('max_positions','N/A')}</span></div>
+            <div class=\"config-item\"><span class=\"config-label\">2. Lambda (1-bar)</span><span class=\"config-value\">{trading_config.get('lambda_1bar','N/A')}</span></div>
+            <div class=\"config-item\"><span class=\"config-label\">3. Lambda (5-bar)</span><span class=\"config-value\">{trading_config.get('lambda_5bar','N/A')}</span></div>
+            <div class=\"config-item\"><span class=\"config-label\">4. Lambda (10-bar)</span><span class=\"config-value\">{trading_config.get('lambda_10bar','N/A')}</span></div>
+            <div class=\"config-item\"><span class=\"config-label\">5. Lambda (20-bar)</span><span class=\"config-value\">{trading_config.get('lambda_20bar','N/A')}</span></div>
+            <div class=\"config-item\"><span class=\"config-label\">6. Min Prediction (Initial)</span><span class=\"config-value\">{trading_config.get('min_prediction_for_entry',0)*100:.2f}%</span></div>
+            <div class=\"config-item\"><span class=\"config-label\">7. Threshold +Trade</span><span class=\"config-value\">+{trading_config.get('min_prediction_increase_on_trade',0)*100:.2f}%</span></div>
+            <div class=\"config-item\"><span class=\"config-label\">8. Threshold -NoTrade</span><span class=\"config-value\">-{trading_config.get('min_prediction_decrease_on_no_trade',0)*100:.2f}%</span></div>
+            <div class=\"config-item\"><span class=\"config-label\">9. Min Bars to Learn</span><span class=\"config-value\">{trading_config.get('min_bars_to_learn','N/A')}</span></div>
+            <div class=\"config-item\"><span class=\"config-label\">10. Bars per Day</span><span class=\"config-value\">{trading_config.get('bars_per_day','N/A')}</span></div>
+            <div class=\"config-item\"><span class=\"config-label\">11. Initial Capital</span><span class=\"config-value\">${trading_config.get('initial_capital',0):,.0f}</span></div>
+            <div class=\"config-item\"><span class=\"config-label\">12. Lookback Window</span><span class=\"config-value\">{trading_config.get('lookback_window','N/A')} bars</span></div>
+            <div class=\"config-item\"><span class=\"config-label\">13. Win Multiplier</span><span class=\"config-value\">{trading_config.get('win_multiplier','N/A')}</span></div>
+            <div class=\"config-item\"><span class=\"config-label\">14. Loss Multiplier</span><span class=\"config-value\">{trading_config.get('loss_multiplier','N/A')}</span></div>
+            <div class=\"config-item\"><span class=\"config-label\">15. Rotation Delta</span><span class=\"config-value\">{trading_config.get('rotation_strength_delta',0)*100:.2f}%</span></div>
+            <div class=\"config-item\"><span class=\"config-label\">16. Min Rank Strength</span><span class=\"config-value\">{trading_config.get('min_rank_strength',0)*100:.3f}%</span></div>
+            """
+
+        html += """
         </div>
     </div>
 """
@@ -804,6 +847,10 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
         # Load price data and generate chart script
         price_data = load_price_data(symbol, data_dir)
         if price_data is not None:
+            # Ensure timestamp column is datetimelike for .dt accessors
+            if 'timestamp' in price_data.columns:
+                price_data['timestamp'] = pd.to_datetime(price_data['timestamp'], utc=True, errors='coerce')
+                price_data = price_data.dropna(subset=['timestamp'])
             # Filter to only the test date range
             if start_date and end_date:
                 price_data['date'] = price_data['timestamp'].dt.strftime('%Y-%m-%d')
@@ -854,10 +901,12 @@ def generate_html_dashboard(trades_path, output_path, config_path='config/rotati
                     prev_date = current_date
 
             # Get entry and exit points - map to bar numbers
-            # Create a mapping from timestamp to bar number
+            # Create a mapping from timestamp (ET minute) to bar number to match trade timestamps
             ts_to_bar = {}
             for idx, row in price_data.iterrows():
-                ts_str = row['timestamp'].strftime('%Y-%m-%d %H:%M')
+                # Convert UTC bar timestamp to ET string at minute precision
+                bar_ms = int(row['timestamp'].timestamp() * 1000)
+                ts_str = utc_ms_to_et_string(bar_ms)
                 ts_to_bar[ts_str] = row['bar_num']
 
             entries = []  # (bar_num, price, timestamp_str)

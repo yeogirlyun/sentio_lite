@@ -7,6 +7,9 @@
 #include "trading/trade_history.h"
 #include "trading/alpaca_cost_model.h"
 #include "trading/trade_filter.h"
+#include "trading/trading_strategy.h"
+#include "strategy/sigor_strategy.h"
+#include "predictor/sigor_predictor_adapter.h"
 #include <unordered_map>
 #include <memory>
 #include <vector>
@@ -28,10 +31,12 @@ struct PredictionData {
  * Trading Configuration
  */
 struct TradingConfig {
+    // Strategy selection
+    StrategyType strategy = StrategyType::EWRLS;  // Default to EWRLS
+    SigorConfig sigor_config;  // SIGOR strategy parameters (used when strategy==SIGOR)
+
     double initial_capital = 100000.0;
     size_t max_positions = 3;
-    double stop_loss_pct = -0.02;      // -2%
-    double profit_target_pct = 0.05;   // 5%
     size_t min_bars_to_learn = 50;     // Warmup period
     size_t lookback_window = 50;
     int bars_per_day = 391;            // 9:30 AM - 4:00 PM inclusive (391 bars)
@@ -39,6 +44,11 @@ struct TradingConfig {
     double win_multiplier = 1.3;
     double loss_multiplier = 0.7;
     size_t trade_history_size = 3;     // Track last N trades for adaptive sizing
+
+    // Adaptive minimum prediction threshold
+    double min_prediction_for_entry = 0.002;  // Starting threshold (0.2%)
+    double min_prediction_increase_on_trade = 0.0005;  // +0.05% per trade
+    double min_prediction_decrease_on_no_trade = 0.0001;  // -0.01% per no-trade bar
 
     // Multi-horizon prediction settings
     MultiHorizonPredictor::Config horizon_config;
@@ -91,6 +101,13 @@ struct TradingConfig {
     double trailing_stop_percentage = 0.50;       // Trail stop at 50% of max profit
     int ma_exit_period = 10;                      // MA period for exit crossover detection
 
+    // ===== PROFIT TARGET & STOP LOSS (from online_trader v2.0 - CRITICAL) =====
+    // These create asymmetric risk/reward and lock in profits
+    bool enable_profit_target = true;      // Take profit at target %
+    double profit_target_pct = 0.03;       // +3% profit target (online_trader value)
+    bool enable_stop_loss = true;          // Cut losses at stop %
+    double stop_loss_pct = 0.015;          // -1.5% stop loss (online_trader value, 2:1 reward:risk)
+
     // Warmup configuration mode
     enum class WarmupMode {
         PRODUCTION,  // Strict criteria - SAFE FOR LIVE TRADING
@@ -105,6 +122,9 @@ struct TradingConfig {
 
         // Configuration mode (CRITICAL: Set to PRODUCTION before live trading!)
         WarmupMode mode = WarmupMode::PRODUCTION;
+
+        // Skip validation for MOCK/backtesting mode (always proceed to test day)
+        bool skip_validation = false;            // If true, skip warmup quality checks (for MOCK mode)
 
         // Go-live criteria (values set based on mode)
         double min_sharpe_ratio;                 // Minimum Sharpe ratio to go live
@@ -216,9 +236,14 @@ private:
         bool is_long = true;             // Direction of position
     };
 
-    // Per-symbol components
+    // Per-symbol components (EWRLS strategy)
     std::unordered_map<Symbol, std::unique_ptr<MultiHorizonPredictor>> predictors_;
     std::unordered_map<Symbol, std::unique_ptr<FeatureExtractor>> extractors_;
+
+    // Per-symbol components (SIGOR strategy)
+    std::unordered_map<Symbol, std::unique_ptr<SigorPredictorAdapter>> sigor_predictors_;
+
+    // Shared components (both strategies)
     std::unordered_map<Symbol, PositionWithCosts> positions_;
     std::unordered_map<Symbol, ExitTrackingData> exit_tracking_;  // Price-based exit tracking
     std::unordered_map<Symbol, std::unique_ptr<TradeHistory>> trade_history_;
@@ -235,8 +260,12 @@ private:
 
     size_t bars_seen_;       // Total bars including warmup
     size_t trading_bars_;    // Trading bars only (excludes warmup) - used for EOD timing
+    size_t test_day_start_bar_;  // Bar index where test day begins (for filtering test-only metrics)
     int total_trades_;
     double total_transaction_costs_;  // Track cumulative costs
+
+    // Adaptive minimum prediction threshold
+    double current_min_prediction_;  // Current min prediction threshold (adaptive)
 
     // Daily tracking (for multi-day testing)
     std::vector<DailyResults> daily_results_;

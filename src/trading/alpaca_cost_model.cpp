@@ -104,32 +104,33 @@ double AlpacaCostModel::calculate_slippage(
     int minutes_from_open,
     const SlippageModel& model
 ) {
-    // Base slippage in dollars per share
-    double base_slip_per_share = price * model.base_slippage_bps / 10000.0;
+    // REALISTIC ALPACA SLIPPAGE FOR LIQUID ETFs
+    // For market orders on highly liquid ETFs (TQQQ, etc.), slippage is minimal
+    // Typical bid-ask spread: 1-2 cents on $100 stock = 1-2 bps
 
-    // Size impact (percentage of ADV)
+    // Base slippage: 0.5 bps for liquid ETFs (half bid-ask spread)
+    double base_slip_per_share = price * 0.5 / 10000.0;
+
+    // Size impact: only matters for large orders (>0.1% ADV)
     double trade_size_pct = static_cast<double>(shares) / avg_daily_volume;
-    double size_impact_per_share = price * (trade_size_pct * 100.0 *
-                                   model.size_impact_factor) / 10000.0;
-
-    // Volatility adjustment (normalized to 2% baseline)
-    double vol_adjustment = 1.0 + (volatility - 0.02) * model.volatility_multiplier;
-    vol_adjustment = std::max(0.5, std::min(3.0, vol_adjustment));  // Clamp to [0.5, 3.0]
-
-    // Time of day factor (higher at open/close)
-    double time_factor = 1.0;
-    if (minutes_from_open < 30) {
-        // First 30 minutes - volatile
-        time_factor = 1.5;
-    } else if (minutes_from_open > 360) {
-        // Last 30 minutes (390 min day) - volatile
-        time_factor = 1.3;
-    } else if (minutes_from_open > 330) {
-        // Last hour - slightly elevated
-        time_factor = 1.1;
+    double size_impact_per_share = 0.0;
+    if (trade_size_pct > 0.001) {  // Only apply if >0.1% of ADV
+        size_impact_per_share = price * (trade_size_pct * 100.0 * 0.1) / 10000.0;
     }
 
-    // Total slippage
+    // Volatility adjustment: MINIMAL for ETFs (they're highly liquid)
+    // Only apply small adjustment for extreme volatility
+    double vol_adjustment = 1.0;
+    if (volatility > 0.05) {  // Only if vol >5%
+        vol_adjustment = 1.0 + (volatility - 0.05) * 0.5;  // Much smaller multiplier
+    }
+    vol_adjustment = std::max(1.0, std::min(1.5, vol_adjustment));  // Cap at 1.5x
+
+    // Time of day: REMOVED - liquid ETFs trade well all day with tight spreads
+    // Alpaca routes to multiple venues with smart order routing
+    double time_factor = 1.0;
+
+    // Total slippage (realistic for Alpaca)
     double slippage_per_share = (base_slip_per_share + size_impact_per_share) *
                                 vol_adjustment * time_factor;
 
@@ -142,22 +143,31 @@ double AlpacaCostModel::calculate_market_impact(
     double avg_daily_volume,
     bool is_buy
 ) {
-    // Square-root market impact model (Almgren-Chriss style)
+    // REALISTIC MARKET IMPACT FOR ALPACA ETF TRADING
+    // For small retail orders (<$100k) in highly liquid ETFs, market impact is NEGLIGIBLE
+    // Alpaca uses smart order routing across multiple venues
+
     double trade_size_pct = static_cast<double>(shares) / avg_daily_volume;
+    double trade_value = price * shares;
 
-    // Temporary impact (reverts after trade)
-    // Impact increases with square root of trade size
-    double temp_impact_bps = 10.0 * std::sqrt(trade_size_pct * 100.0);
+    // Only apply market impact for large orders
+    if (trade_value < 100000.0 || trade_size_pct < 0.01) {
+        // Orders under $100k or <1% ADV have effectively zero market impact
+        return 0.0;
+    }
 
-    // Permanent impact (price discovery, does not revert)
-    double perm_impact_bps = 5.0 * trade_size_pct * 100.0;
+    // For larger orders, use conservative impact model
+    // Temporary impact: much smaller coefficient for liquid ETFs
+    double temp_impact_bps = 1.0 * std::sqrt(trade_size_pct * 100.0);
+
+    // Permanent impact: also much smaller for ETFs (they're index-based, not price discovery)
+    double perm_impact_bps = 0.5 * trade_size_pct * 100.0;
 
     // Total impact in basis points
     double total_impact_bps = temp_impact_bps + perm_impact_bps;
 
-    // Direction multiplier
-    // Buy orders move price against you more than sells
-    double direction_multiplier = is_buy ? 1.0 : 0.5;
+    // Direction: minimal difference for liquid ETFs
+    double direction_multiplier = is_buy ? 1.0 : 0.8;
 
     return price * shares * (total_impact_bps / 10000.0) * direction_multiplier;
 }

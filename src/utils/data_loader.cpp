@@ -226,8 +226,13 @@ DataLoader::load_from_directory(const std::string& directory,
             path = directory + "/" + upper_symbol + extension;
 
             if (!std::filesystem::exists(path)) {
-                throw std::runtime_error("Data file not found for symbol: " +
-                                       symbol + " (tried: " + path + ")");
+                // Try with _RTH_NH suffix (Regular Trading Hours, No Holidays)
+                path = directory + "/" + upper_symbol + "_RTH_NH" + extension;
+
+                if (!std::filesystem::exists(path)) {
+                    throw std::runtime_error("Data file not found for symbol: " +
+                                           symbol + " (tried: " + path + ")");
+                }
             }
         }
         paths[symbol] = path;

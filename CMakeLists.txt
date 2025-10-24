@@ -56,6 +56,9 @@ set(CORE_SOURCES
     # Features (backward compatibility wrapper)
     src/features/unified_features.cpp          # Wrapper around FeatureExtractor
 
+    # Strategy (alternative to EWRLS)
+    src/strategy/sigor_strategy.cpp            # Sigor rule-based ensemble (7 detectors)
+
     # Trading engine
     src/trading/multi_symbol_trader.cpp        # Multi-symbol rotation trading
     src/trading/alpaca_cost_model.cpp          # Alpaca transaction cost model
@@ -96,6 +99,14 @@ target_include_directories(sentio_core PUBLIC
 # Main trading system
 add_executable(sentio_lite src/main.cpp)
 target_link_libraries(sentio_lite PRIVATE
+    sentio_core
+    Eigen3::Eigen
+    Threads::Threads
+)
+
+# Sigor strategy test
+add_executable(test_sigor src/test_sigor.cpp)
+target_link_libraries(test_sigor PRIVATE
     sentio_core
     Eigen3::Eigen
     Threads::Threads

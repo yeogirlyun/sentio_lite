@@ -30,7 +30,55 @@ std::optional<Eigen::VectorXd> FeatureExtractor::extract(const Bar& bar) {
     // Cyclical encoding for intraday patterns (from online_trader)
     calculate_time_features(bar.timestamp, features, idx);
 
-    // ===== MOMENTUM FEATURES (8-11) =====
+    // ========================================================================
+    // ===== RAW ABSOLUTE VALUE FEATURES (8-28) =====
+    // CRITICAL: These are from online_trader v2.0 that achieved 5.41% MRD
+    // EWRLS needs absolute values to learn price-dependent patterns!
+    // ========================================================================
+
+    // --- Raw OHLC (8-11) ---
+    features(idx++) = bar.close;   // Raw close price (e.g., 450.25)
+    features(idx++) = bar.open;    // Raw open price
+    features(idx++) = bar.high;    // Raw high price
+    features(idx++) = bar.low;     // Raw low price
+
+    // --- Raw Moving Averages (12-17) ---
+    features(idx++) = calculate_sma(prices, 10);   // SMA-10 (absolute)
+    features(idx++) = calculate_sma(prices, 20);   // SMA-20 (absolute)
+    features(idx++) = calculate_sma(prices, 50);   // SMA-50 (absolute)
+    features(idx++) = calculate_ema(prices, 10);   // EMA-10 (absolute)
+    features(idx++) = calculate_ema(prices, 20);   // EMA-20 (absolute)
+    features(idx++) = calculate_ema(prices, 50);   // EMA-50 (absolute)
+
+    // --- Raw Bollinger Bands (18-21) ---
+    // Calculate BB first for raw values
+    BollingerBands bb = calculate_bollinger_bands(prices, 20, 2.0);
+    features(idx++) = bb.mean;     // Raw BB mean (e.g., 448.50)
+    features(idx++) = bb.upper;    // Raw BB upper band
+    features(idx++) = bb.lower;    // Raw BB lower band
+    features(idx++) = bb.sd;       // Raw BB standard deviation
+
+    // --- Raw ATR (22) ---
+    double raw_atr = calculate_atr(bars, 14) * bar.close;  // Denormalize ATR to absolute value
+    features(idx++) = raw_atr;     // Raw ATR (e.g., 2.50)
+
+    // --- Raw Volume (23-24) ---
+    features(idx++) = static_cast<double>(bar.volume);  // Raw volume (e.g., 1,250,000)
+    features(idx++) = calculate_obv_approx(bars);       // OBV approximation (cumulative volume)
+
+    // --- Raw Price Metrics (25-28) ---
+    // These help identify candlestick patterns in absolute terms
+    features(idx++) = bar.high - bar.low;          // Raw range (e.g., 1.50)
+    features(idx++) = bar.close - bar.open;        // Raw body (e.g., 0.45)
+    features(idx++) = bar.high - bar.close;        // Raw upper wick
+    features(idx++) = bar.close - bar.low;         // Raw lower wick
+
+    // ========================================================================
+    // ===== NORMALIZED/RATIO FEATURES (29-62) =====
+    // Keep existing features for compatibility (indices shifted by +21)
+    // ========================================================================
+
+    // ===== MOMENTUM FEATURES (29-32) =====
     // Short-term to longer-term momentum
     features(idx++) = calculate_momentum(prices, 1);   // 1-bar return
     features(idx++) = calculate_momentum(prices, 3);   // 3-bar return
@@ -86,8 +134,7 @@ std::optional<Eigen::VectorXd> FeatureExtractor::extract(const Bar& bar) {
     features(idx++) = calculate_ma_deviation(prices, 20);  // Longer-term MA deviation (20 bars)
 
     // ===== BOLLINGER BANDS FEATURES (35-40) =====
-    // Calculate Bollinger Bands (20-period, k=2)
-    BollingerBands bb = calculate_bollinger_bands(prices, 20, 2.0);
+    // Note: BB already calculated above for raw features, reuse it here
     Price current_price = bar.close;
 
     // BB Mean Deviation: (close - bb_mean) / close
@@ -388,6 +435,71 @@ std::vector<Volume> FeatureExtractor::get_volumes() const {
 
 std::vector<Bar> FeatureExtractor::get_bars() const {
     return history_.to_vector();
+}
+
+// ========================================================================
+// RAW ABSOLUTE VALUE HELPER FUNCTIONS (from online_trader v2.0)
+// ========================================================================
+
+double FeatureExtractor::calculate_sma(const std::vector<Price>& prices, int period) const {
+    size_t n = prices.size();
+    if (n == 0 || static_cast<size_t>(period) > n) return 0.0;
+
+    // Calculate simple moving average over last 'period' prices
+    double sum = 0.0;
+    for (int i = 0; i < period; ++i) {
+        sum += prices[n - 1 - i];
+    }
+
+    return sum / period;  // Return absolute SMA value (e.g., 448.50)
+}
+
+double FeatureExtractor::calculate_ema(const std::vector<Price>& prices, int period) const {
+    size_t n = prices.size();
+    if (n == 0) return 0.0;
+
+    // If not enough data, return SMA
+    if (static_cast<size_t>(period) > n) {
+        return calculate_sma(prices, n);
+    }
+
+    // EMA multiplier: 2 / (period + 1)
+    double multiplier = 2.0 / (period + 1);
+
+    // Start with SMA of first 'period' prices as seed
+    double ema = 0.0;
+    for (int i = 0; i < period; ++i) {
+        ema += prices[i];
+    }
+    ema /= period;
+
+    // Calculate EMA for remaining prices
+    for (size_t i = period; i < n; ++i) {
+        ema = (prices[i] - ema) * multiplier + ema;
+    }
+
+    return ema;  // Return absolute EMA value (e.g., 449.20)
+}
+
+double FeatureExtractor::calculate_obv_approx(const std::vector<Bar>& bars) const {
+    if (bars.size() < 2) return 0.0;
+
+    // Simplified OBV: cumulative sum of signed volume
+    // Volume is positive if close > previous close, negative otherwise
+    double obv = 0.0;
+
+    for (size_t i = 1; i < bars.size(); ++i) {
+        double volume = static_cast<double>(bars[i].volume);
+
+        if (bars[i].close > bars[i-1].close) {
+            obv += volume;  // Price up: add volume
+        } else if (bars[i].close < bars[i-1].close) {
+            obv -= volume;  // Price down: subtract volume
+        }
+        // If close == prev_close, don't change OBV
+    }
+
+    return obv;  // Return cumulative volume balance
 }
 
 FeatureExtractor::BollingerBands FeatureExtractor::calculate_bollinger_bands(

@@ -52,37 +52,20 @@ bool TradeFilter::should_exit_position(
 
     const auto& state = it->second;
     int bars_held = current_bar - state.entry_bar;
-    double current_pnl_pct = calculate_pnl_pct(symbol, current_price);
 
-    // 1. Emergency stop loss (overrides minimum hold)
-    if (current_pnl_pct < config_.emergency_stop_loss_pct) {
-        return true;
-    }
-
-    // 2. Enforce minimum holding period (except for emergency)
+    // CRITICAL: Enforce minimum holding period to prevent churning
+    // This prevents paying transaction costs for 1-bar flips that lose to costs
     if (bars_held < config_.min_bars_to_hold) {
-        return false;
+        return false;  // Must hold for minimum period
     }
 
-    // 3. Maximum holding period reached
-    if (bars_held >= config_.max_bars_to_hold) {
-        return true;
-    }
-
-    // 4. Profit target reached
-    // Expected return = entry_prediction * bars_held (simple linear model)
-    double expected_return = state.entry_prediction * bars_held;
-    if (current_pnl_pct > expected_return * config_.profit_target_multiple) {
-        return true;
-    }
-
-    // 5. Signal quality degraded significantly
+    // 1. Signal quality degraded significantly
     // Use the 5-bar prediction as primary signal
     if (prediction.pred_5bar.confidence < config_.exit_confidence_threshold) {
         return true;
     }
 
-    // 6. Signal reversed direction
+    // 2. Signal reversed direction
     if (state.entry_prediction > 0 &&
         prediction.pred_5bar.prediction < config_.exit_signal_reversed_threshold) {
         return true;  // Was bullish, now bearish
@@ -92,18 +75,12 @@ bool TradeFilter::should_exit_position(
         return true;  // Was bearish, now bullish
     }
 
-    // 7. Adaptive exit threshold based on holding duration
-    // As we approach typical_hold_period, lower the bar for exit
-    if (bars_held >= config_.typical_hold_period) {
-        double progress = static_cast<double>(bars_held - config_.typical_hold_period) /
-                         (config_.max_bars_to_hold - config_.typical_hold_period);
-        double adaptive_threshold = config_.min_confidence_for_entry *
-                                   (1.0 - 0.3 * progress);  // Reduce by up to 30%
-
-        if (prediction.pred_5bar.confidence < adaptive_threshold) {
-            return true;
-        }
-    }
+    // NOTE: Removed ALL P&L-based exits (stop loss, profit target, emergency stop)
+    // Exits are now 100% signal-driven:
+    //   - EOD liquidation (handled in MultiSymbolTrader)
+    //   - Rotation to better signal (handled in MultiSymbolTrader)
+    //   - Signal quality degradation (above)
+    //   - Signal reversal (above)
 
     return false;
 }

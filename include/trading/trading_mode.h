@@ -7,8 +7,9 @@ namespace trading {
  * Trading Mode - Mock vs Live
  */
 enum class TradingMode {
-    MOCK,   // Backtest on historical data
-    LIVE    // Live paper trading (future: real trading)
+    MOCK,       // Backtest on historical data
+    MOCK_LIVE,  // Replay historical data as if live (bridge-compatible)
+    LIVE        // Live paper trading (future: real trading)
 };
 
 /**
@@ -18,6 +19,9 @@ inline TradingMode parse_trading_mode(const std::string& mode_str) {
     if (mode_str == "live" || mode_str == "LIVE") {
         return TradingMode::LIVE;
     }
+    if (mode_str == "mock-live" || mode_str == "MOCK-LIVE" || mode_str == "mock_live") {
+        return TradingMode::MOCK_LIVE;
+    }
     return TradingMode::MOCK;
 }
 
@@ -25,7 +29,12 @@ inline TradingMode parse_trading_mode(const std::string& mode_str) {
  * Convert TradingMode to string
  */
 inline std::string to_string(TradingMode mode) {
-    return (mode == TradingMode::LIVE) ? "LIVE" : "MOCK";
+    switch (mode) {
+        case TradingMode::MOCK: return "MOCK";
+        case TradingMode::MOCK_LIVE: return "MOCK_LIVE";
+        case TradingMode::LIVE: return "LIVE";
+        default: return "UNKNOWN";
+    }
 }
 
 /**

@@ -1,9 +1,11 @@
 #include "trading/multi_symbol_trader.h"
 #include "trading/trading_mode.h"
+#include "trading/trading_strategy.h"
 #include "utils/data_loader.h"
 #include "utils/date_filter.h"
 #include "utils/results_exporter.h"
 #include "utils/config_reader.h"
+#include "utils/config_loader.h"
 #include <iostream>
 #include <iomanip>
 #include <fstream>
@@ -34,12 +36,19 @@ struct Config {
     std::string test_date;  // YYYY-MM-DD format (single test day, required)
 
     // Training/simulation period (historical data for learning)
-    int sim_days = 20;       // Default 20 days of historical simulation
+    int sim_days = 0;        // Default 0 days (warmup-only by default)
     size_t sim_bars = 0;     // Calculated from sim_days
 
-    // Warmup period (fixed at 1 day before test day)
-    static constexpr int warmup_days = 1;  // Fixed: 1 day warmup
-    size_t warmup_bars = 0;  // Calculated: 1 day = 391 bars
+    // Warmup period - can be specified in bars or days
+    // Default: 100 bars (from bar 291 to 391 of previous day, ending at 4:00 PM)
+    int warmup_bars_specified = 100;  // User-specified warmup bars (default 100)
+    bool warmup_in_bars = true;       // True if user specified bars, false if days
+    bool intraday_warmup = false;     // True = warmup from test day itself (bars 1-N)
+    size_t warmup_bars = 100;         // Actual warmup bars to use
+
+    // Strategy selection
+    StrategyType strategy = StrategyType::EWRLS;  // Default to EWRLS
+    std::string strategy_str = "ewrls";
 
     // Dashboard generation (enabled by default)
     bool generate_dashboard = true;
@@ -64,18 +73,23 @@ void print_usage(const char* program_name) {
               << "Required Options:\n"
               << "  --date YYYY-MM-DD    Test date (single day)\n\n"
               << "Common Options:\n"
-              << "  --sim-days N         Simulation trading days (default: 20)\n"
-              << "  --capital AMOUNT     Initial capital (default: 100000)\n"
-              << "  --max-positions N    Max concurrent positions (default: 3)\n"
+              << "  --strategy NAME      Trading strategy: ewrls (default) or sigor\n"
+              << "                       ewrls = Multi-Horizon EWRLS predictor\n"
+              << "                       sigor = Rule-based 7-detector ensemble\n"
+              << "  --sim-days N         Simulation trading days (default: 20, use 0 for warmup-only)\n"
+              << "  --warmup-bars N      Warmup bars (default: 100, from previous day)\n"
+              << "  --intraday-warmup    Use first N bars of TEST DAY as warmup (not prev day)\n"
+              << "                       Example: --warmup-bars 50 --intraday-warmup\n"
+              << "                       → Warmup on bars 1-50, trade on bars 51-391\n"
               << "  --no-dashboard       Disable HTML dashboard report (enabled by default)\n"
               << "  --verbose            Show detailed progress\n\n"
               << "Mock Mode Options:\n"
               << "  --data-dir DIR       Data directory (default: data)\n"
               << "  --extension EXT      File extension: .bin or .csv (default: .bin)\n\n"
-              << "Trading Parameters:\n"
-              << "  --stop-loss PCT      Stop loss percentage (default: -0.02)\n"
-              << "  --profit-target PCT  Profit target percentage (default: 0.05)\n"
-              << "  --lambda LAMBDA      EWRLS forgetting factor (default: 0.98)\n\n"
+              << "Configuration:\n"
+              << "  All trading parameters are loaded from config/trading_params.json\n"
+              << "  Run Optuna optimization to generate optimal config:\n"
+              << "    python3 tools/optuna_5day_search.py --end-date 2025-10-23\n\n"
               << "Output Options:\n"
               << "  --results-file FILE  Results JSON file (default: results.json)\n"
               << "  --help               Show this help message\n\n"
@@ -86,8 +100,8 @@ void print_usage(const char* program_name) {
               << "  " << program_name << " mock --date 2025-10-21 --sim-days 10\n\n"
               << "  # Test without dashboard\n"
               << "  " << program_name << " mock --date 2025-10-21 --no-dashboard\n\n"
-              << "  # Optimize parameters with Optuna\n"
-              << "  python3 tools/optuna_quick_optimize.py --date 2025-10-21 --sim-days 20\n\n"
+              << "  # Optimize parameters with Optuna (5-day validation)\n"
+              << "  python3 tools/optuna_5day_search.py --end-date 2025-10-23 --trials 200\n\n"
               << "Symbol Configuration:\n"
               << "  Symbols are loaded from config/symbols.conf\n"
               << "  Edit config/symbols.conf to change the symbol list\n\n"
@@ -108,7 +122,7 @@ bool parse_args(int argc, char* argv[], Config& config) {
         return false;
     }
 
-    if (mode_arg != "mock" && mode_arg != "live") {
+    if (mode_arg != "mock" && mode_arg != "live" && mode_arg != "mock-live") {
         std::cerr << "Error: First argument must be 'mock' or 'live'\n";
         return false;
     }
@@ -125,12 +139,25 @@ bool parse_args(int argc, char* argv[], Config& config) {
         return false;
     }
 
-    // Parse remaining options
+    // NOTE: We'll determine strategy first, then load the appropriate config
+
+    // Pre-pass to extract strategy if provided
     for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
 
         if (arg == "--help" || arg == "-h") {
             return false;
+        }
+        // Strategy selection (pre-parse only)
+        else if (arg == "--strategy" && i + 1 < argc) {
+            config.strategy_str = argv[++i];
+            try {
+                config.strategy = parse_strategy_type(config.strategy_str);
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << "\n";
+                std::cerr << "Valid strategies: ewrls, sigor\n";
+                return false;
+            }
         }
         // Data options
         else if (arg == "--data-dir" && i + 1 < argc) {
@@ -150,29 +177,14 @@ bool parse_args(int argc, char* argv[], Config& config) {
         else if (arg == "--sim-days" && i + 1 < argc) {
             config.sim_days = std::stoi(argv[++i]);
         }
-        // Trading parameters
-        else if (arg == "--capital" && i + 1 < argc) {
-            config.capital = std::stod(argv[++i]);
-            config.trading.initial_capital = config.capital;
+        // Warmup period (bars before test day)
+        else if (arg == "--warmup-bars" && i + 1 < argc) {
+            config.warmup_bars_specified = std::stoi(argv[++i]);
+            config.warmup_in_bars = true;
         }
-        else if (arg == "--max-positions" && i + 1 < argc) {
-            config.trading.max_positions = std::stoul(argv[++i]);
-        }
-        else if (arg == "--stop-loss" && i + 1 < argc) {
-            config.trading.stop_loss_pct = std::stod(argv[++i]);
-        }
-        else if (arg == "--profit-target" && i + 1 < argc) {
-            config.trading.profit_target_pct = std::stod(argv[++i]);
-        }
-        else if (arg == "--lambda" && i + 1 < argc) {
-            // Set all lambda values to the same (can be customized further if needed)
-            double lambda = std::stod(argv[++i]);
-            config.trading.horizon_config.lambda_1bar = lambda;
-            config.trading.horizon_config.lambda_5bar = lambda;
-            config.trading.horizon_config.lambda_10bar = lambda;
-        }
-        else if (arg == "--min-threshold" && i + 1 < argc) {
-            config.trading.filter_config.min_prediction_for_entry = std::stod(argv[++i]);
+        // Intraday warmup (use first N bars of test day as warmup)
+        else if (arg == "--intraday-warmup") {
+            config.intraday_warmup = true;
         }
         // Output options
         else if (arg == "--no-dashboard") {
@@ -190,9 +202,39 @@ bool parse_args(int argc, char* argv[], Config& config) {
         }
     }
 
-    // Calculate bars (warmup is fixed at 1 day, sim is configurable)
-    config.warmup_bars = config.warmup_days * config.trading.bars_per_day;  // 391 bars (1 day fixed)
-    config.sim_bars = config.sim_days * config.trading.bars_per_day;        // e.g., 7820 bars (20 days)
+    // Load configuration based on selected strategy
+    try {
+        if (config.strategy == StrategyType::SIGOR) {
+            // Attempt to load full trading config from a SIGOR-specific file if it exists
+            // Fallback to EWRLS trading params if SIGOR trading file is absent
+            const std::string sigor_trading_path = "config/sigor_trading_params.json";
+            if (std::filesystem::exists(sigor_trading_path)) {
+                config.trading = trading::ConfigLoader::load(sigor_trading_path);
+            } else {
+                config.trading = trading::ConfigLoader::load("config/trading_params.json");
+            }
+            // Load SIGOR model parameters
+            config.trading.sigor_config = trading::SigorConfigLoader::load("config/sigor_params.json");
+            config.trading.strategy = StrategyType::SIGOR;
+            std::cout << "\n📊 SIGOR Strategy Configuration Loaded\n";
+            trading::SigorConfigLoader::print_config(config.trading.sigor_config, "config/sigor_params.json");
+        } else {
+            // Default EWRLS
+            config.trading = trading::ConfigLoader::load("config/trading_params.json");
+            config.trading.strategy = StrategyType::EWRLS;
+            trading::ConfigLoader::print_config(config.trading, "config/trading_params.json");
+        }
+        config.capital = config.trading.initial_capital;
+    } catch (const std::exception& e) {
+        std::cerr << "❌ Error loading strategy configuration: " << e.what() << "\n";
+        return false;
+    }
+
+    // Calculate bars
+    // Warmup: Use specified bars (default 100), always ends at bar 391
+    config.warmup_bars = config.warmup_bars_specified;
+    // Simulation: Calculate from days
+    config.sim_bars = config.sim_days * config.trading.bars_per_day;
 
     return true;
 }
@@ -200,7 +242,8 @@ bool parse_args(int argc, char* argv[], Config& config) {
 void generate_dashboard(const std::string& results_file, const std::string& script_path,
                         const std::string& trades_file, const std::string& output_file,
                         const std::string& data_dir, double initial_capital,
-                        const std::string& start_date, const std::string& end_date) {
+                        const std::string& start_date, const std::string& end_date,
+                        const std::string& config_file = "config/symbols.conf") {
     std::cout << "\nGenerating dashboard...\n";
 
     // Build command with all required arguments
@@ -210,7 +253,8 @@ void generate_dashboard(const std::string& results_file, const std::string& scri
         << " --output " << output_file
         << " --start-equity " << std::fixed << std::setprecision(0) << initial_capital
         << " --data-dir " << data_dir
-        << " --results " << results_file;
+        << " --results " << results_file
+        << " --config " << config_file;
 
     if (!start_date.empty()) {
         cmd << " --start-date " << start_date;
@@ -266,7 +310,7 @@ std::vector<std::string> get_trading_days(const std::vector<Bar>& bars) {
         auto duration = bar.timestamp.time_since_epoch();
         auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
         time_t time = static_cast<time_t>(seconds);
-        struct tm* timeinfo = localtime(&time);
+        struct tm* timeinfo = gmtime(&time);  // Use GMT/UTC instead of localtime
         char buffer[11];
         strftime(buffer, sizeof(buffer), "%Y-%m-%d", timeinfo);
         unique_days.insert(buffer);
@@ -363,36 +407,47 @@ void filter_to_date_range(std::unordered_map<Symbol, std::vector<Bar>>& all_data
 }
 
 // Filter bars to specific date (including simulation + warmup period before it)
+// Warmup bars always END at bar 391 (4:00 PM) of the previous trading day
 void filter_to_date(std::unordered_map<Symbol, std::vector<Bar>>& all_data,
                    const std::string& date_str, size_t sim_bars, size_t warmup_bars,
                    int bars_per_day, bool verbose = false) {
     if (all_data.empty()) return;
 
-    // Get trading days from first symbol
+    // Get trading days from first symbol (optimized: only check last 60 days worth of bars)
     const auto& first_symbol_bars = all_data.begin()->second;
-    std::vector<std::string> trading_days = get_trading_days(first_symbol_bars);
+    size_t sample_size = std::min(first_symbol_bars.size(), size_t(60 * bars_per_day));
+    size_t start_idx = first_symbol_bars.size() > sample_size ? first_symbol_bars.size() - sample_size : 0;
+    std::vector<Bar> sample_bars(first_symbol_bars.begin() + start_idx, first_symbol_bars.end());
+    std::vector<std::string> trading_days = get_trading_days(sample_bars);
 
-    // Calculate total days needed (sim + warmup)
-    int total_training_days = (sim_bars + warmup_bars + bars_per_day - 1) / bars_per_day;
+    // Find test date index
+    auto it = std::find(trading_days.begin(), trading_days.end(), date_str);
+    if (it == trading_days.end()) {
+        throw std::runtime_error("Test date not found: " + date_str);
+    }
+    int test_day_idx = std::distance(trading_days.begin(), it);
 
-    // Find start date by counting backwards from target date
-    std::string warmup_start_date = find_warmup_start_date(trading_days, date_str, total_training_days);
+    // Total bars needed: sim_bars + warmup_bars + test_day_bars
+    size_t total_bars = sim_bars + warmup_bars + bars_per_day;
 
-    // Parse warmup start date
-    int ws_year, ws_month, ws_day;
-    sscanf(warmup_start_date.c_str(), "%d-%d-%d", &ws_year, &ws_month, &ws_day);
+    // Calculate how many bars from start of data
+    // We need to go back enough to get all sim + warmup bars
+    // Warmup must END at bar 391 of previous day
 
-    struct tm warmup_start_timeinfo = {};
-    warmup_start_timeinfo.tm_year = ws_year - 1900;
-    warmup_start_timeinfo.tm_mon = ws_month - 1;
-    warmup_start_timeinfo.tm_mday = ws_day;
-    warmup_start_timeinfo.tm_hour = 9;   // 9:30 AM ET (market open)
-    warmup_start_timeinfo.tm_min = 30;
-    warmup_start_timeinfo.tm_sec = 0;
-    warmup_start_timeinfo.tm_isdst = -1;
+    // Calculate how many days we need to go back
+    // Example: warmup_bars=100, sim_bars=0 → need last 100 bars of previous day (bars 292-391)
+    // Example: warmup_bars=400, sim_bars=0 → need 9 bars from 2 days ago + 391 from 1 day ago
+    size_t total_history_bars = sim_bars + warmup_bars;
+    int days_back = (total_history_bars + bars_per_day - 1) / bars_per_day;
 
-    time_t warmup_start_time = mktime(&warmup_start_timeinfo);
-    Timestamp warmup_start_timestamp = std::chrono::system_clock::from_time_t(warmup_start_time);
+    // Find starting date (go back enough days before test date)
+    int start_day_idx = std::max(0, test_day_idx - days_back);
+    std::string start_date = trading_days[start_day_idx];
+
+    // For the filtered data, we want:
+    // - All bars from start_date onwards
+    // - But we'll extract exactly (sim_bars + warmup_bars + test_day_bars) bars
+    // - Where warmup ends at bar 391 of day before test
 
     // Parse target date (end of day)
     int year, month, day;
@@ -412,22 +467,37 @@ void filter_to_date(std::unordered_map<Symbol, std::vector<Bar>>& all_data,
 
     if (verbose) {
         std::cout << "\n[DEBUG] Date filtering:\n";
-        std::cout << "  Target date: " << date_str << "\n";
-        std::cout << "  Total training days (sim + warmup): " << total_training_days << "\n";
-        std::cout << "  Training start date: " << warmup_start_date << "\n";
+        std::cout << "  Test date: " << date_str << "\n";
+        std::cout << "  Warmup bars: " << warmup_bars << " (ends at bar 391 of previous day)\n";
+        std::cout << "  Sim bars: " << sim_bars << "\n";
+        std::cout << "  Total bars needed: " << total_bars << "\n";
+        std::cout << "  Days back: " << days_back << "\n";
+        std::cout << "  Start date: " << start_date << "\n";
     }
 
-    // Filter each symbol to this date range
+    // For each symbol, collect bars and take exactly the right number ending at test date
     for (auto& [symbol, bars] : all_data) {
-        std::vector<Bar> filtered;
-
+        // Find bars up to and including test date
+        std::vector<Bar> candidate_bars;
         for (const auto& bar : bars) {
-            if (bar.timestamp >= warmup_start_timestamp && bar.timestamp <= end_timestamp) {
-                filtered.push_back(bar);
+            if (bar.timestamp <= end_timestamp) {
+                candidate_bars.push_back(bar);
             }
         }
 
-        bars = std::move(filtered);
+        // Take the last (total_bars) bars
+        if (candidate_bars.size() >= total_bars) {
+            bars = std::vector<Bar>(
+                candidate_bars.end() - total_bars,
+                candidate_bars.end()
+            );
+        } else {
+            throw std::runtime_error(
+                "Insufficient data for " + symbol + ": need " +
+                std::to_string(total_bars) + " bars, have " +
+                std::to_string(candidate_bars.size())
+            );
+        }
     }
 }
 
@@ -526,12 +596,30 @@ int run_mock_mode(Config& config) {
         // Example: 20 sim + 1 warmup + 1 test = 22 days required
         // NO FALLBACKS - fail fast if insufficient data
 
-        int required_days = config.sim_days + config.warmup_days + 1;  // +1 for test day
-        size_t required_bars = required_days * config.trading.bars_per_day;
+        // Calculate required bars based on warmup mode
+        size_t required_bars;
+        int warmup_days;
+        int required_days;
+
+        if (config.intraday_warmup) {
+            // Intraday warmup: warmup comes FROM test day, so we need: sim + test_day only
+            required_bars = config.sim_bars + config.trading.bars_per_day;
+            warmup_days = 0;  // No extra days for warmup
+            required_days = config.sim_days + 1;  // Just sim + test day
+        } else {
+            // Previous day warmup: need sim + warmup + test_day
+            required_bars = config.sim_bars + config.warmup_bars + config.trading.bars_per_day;
+            warmup_days = (config.warmup_bars + config.trading.bars_per_day - 1) / config.trading.bars_per_day;
+            required_days = config.sim_days + warmup_days + 1;  // +1 for test day
+        }
 
         std::cout << "\n✅ Data Requirement Check:\n";
-        std::cout << "  Required: " << required_days << " days (" << required_bars << " bars)\n";
-        std::cout << "    - Warmup:     1 day (" << config.warmup_bars << " bars)\n";
+        std::cout << "  Required: ~" << required_days << " days (" << required_bars << " bars)\n";
+        if (config.intraday_warmup) {
+            std::cout << "    - Warmup:     " << config.warmup_bars << " bars (FROM test day, bars 1-" << config.warmup_bars << ")\n";
+        } else {
+            std::cout << "    - Warmup:     " << config.warmup_bars << " bars (ends at bar 391 of prev day)\n";
+        }
         std::cout << "    - Simulation: " << config.sim_days << " days (" << config.sim_bars << " bars)\n";
         std::cout << "    - Test:       1 day (" << config.trading.bars_per_day << " bars)\n";
 
@@ -542,10 +630,17 @@ int run_mock_mode(Config& config) {
                      << (bars.size() / config.trading.bars_per_day) << " days)\n";
         }
 
-        // Filter to test date (including simulation + warmup + test day)
+        // Filter to test date
         std::cout << "\n  Filtering to test date window...\n";
-        filter_to_date(all_data, test_date, config.sim_bars, config.warmup_bars,
-                      config.trading.bars_per_day, config.verbose);
+        if (config.intraday_warmup) {
+            // For intraday warmup: only load sim_bars + test_day (warmup comes from test day)
+            filter_to_date(all_data, test_date, config.sim_bars, 0,  // warmup=0, it's IN the test day
+                          config.trading.bars_per_day, config.verbose);
+        } else {
+            // Normal: load sim + warmup (from prev day) + test day
+            filter_to_date(all_data, test_date, config.sim_bars, config.warmup_bars,
+                          config.trading.bars_per_day, config.verbose);
+        }
 
         // CRITICAL: Check EXACT bar count after filtering
         std::cout << "\n  Data after filtering:\n";
@@ -579,6 +674,9 @@ int run_mock_mode(Config& config) {
         std::cout << "\n✅ STRICT VALIDATION PASSED: All symbols have exactly "
                   << required_bars << " bars (" << required_days << " days)\n";
 
+        // Recalculate min_bars after filtering
+        min_bars = required_bars;
+
         // DEBUG: Verify filtered data integrity
         if (config.verbose) {
             std::cout << "\n[DEBUG] Checking filtered data integrity:\n";
@@ -593,14 +691,23 @@ int run_mock_mode(Config& config) {
         }
 
         std::cout << "\nRunning MOCK mode (" << min_bars << " bars total)...\n";
+        if (config.intraday_warmup) {
+            std::cout << "  Warmup: " << config.warmup_bars << " bars (FROM test day, bars 1-" << config.warmup_bars << ")\n";
+            std::cout << "  Trading: " << (config.trading.bars_per_day - config.warmup_bars) << " bars (test day, bars " << (config.warmup_bars + 1) << "-391)\n";
+        } else {
+            std::cout << "  Warmup: " << config.warmup_bars << " bars (ends at bar 391 of prev day)\n";
+        }
         std::cout << "  Simulation: " << config.sim_bars << " bars (" << config.sim_days << " days)\n";
-        std::cout << "  Warmup: " << config.warmup_bars << " bars (1 day, fixed)\n";
         std::cout << "  Test: " << config.trading.bars_per_day << " bars (1 day)\n";
         std::cout << "  Features: 54 features (8 time + 28 technical + 6 BB + 12 regime)\n";
-        std::cout << "  Predictor: Multi-Horizon EWRLS (1/5/10 bars, λ="
-                  << config.trading.horizon_config.lambda_1bar << "/"
-                  << config.trading.horizon_config.lambda_5bar << "/"
-                  << config.trading.horizon_config.lambda_10bar << ")\n";
+        if (config.strategy == StrategyType::EWRLS) {
+            std::cout << "  Predictor: Multi-Horizon EWRLS (1/5/10 bars, λ="
+                      << config.trading.horizon_config.lambda_1bar << "/"
+                      << config.trading.horizon_config.lambda_5bar << "/"
+                      << config.trading.horizon_config.lambda_10bar << ")\n";
+        } else if (config.strategy == StrategyType::SIGOR) {
+            std::cout << "  Predictor: SIGOR (rule-based ensemble)\n";
+        }
         std::cout << "  Strategy: Multi-symbol rotation (top " << config.trading.max_positions << ")\n";
         std::cout << "  Min prediction threshold: " << config.trading.filter_config.min_prediction_for_entry << "\n";
         std::cout << "  Min holding period: " << config.trading.filter_config.min_bars_to_hold << " bars\n\n";
@@ -611,6 +718,13 @@ int run_mock_mode(Config& config) {
         // Sim: practice trading (trades are NOT optimized for)
         // Test: real trades (ONLY these trades count for optimization)
         config.trading.min_bars_to_learn = config.warmup_bars;
+
+        // MOCK mode: Configure warmup system for single-day optimization
+        // Convert warmup bars to days (for phase management)
+        int warmup_days_for_config = (config.warmup_bars + config.trading.bars_per_day - 1) / config.trading.bars_per_day;
+        config.trading.warmup.observation_days = warmup_days_for_config;
+        config.trading.warmup.simulation_days = config.sim_days;      // N days (user specified)
+        config.trading.warmup.skip_validation = true;  // Always proceed to test day
 
         // Initialize trader
         MultiSymbolTrader trader(config.symbols, config.trading);
@@ -675,10 +789,18 @@ int run_mock_mode(Config& config) {
             if (i < config.symbols.size() - 1) symbols_str += ",";
         }
 
+        // Collect filtered bars for all symbols to embed in results
+        std::unordered_map<Symbol, std::vector<Bar>> filtered_bars;
+        filtered_bars.reserve(all_data.size());
+        for (const auto& symbol : config.symbols) {
+            filtered_bars[symbol] = all_data[symbol];
+        }
+
         ResultsExporter::export_json(
             results, trader, config.results_file,
             symbols_str, "MOCK",
-            test_date, test_date  // Single day: start = end
+            test_date, test_date,  // Single day: start = end
+            filtered_bars
         );
 
         if (!config.generate_dashboard) {
@@ -764,8 +886,10 @@ int run_mock_mode(Config& config) {
             // Create logs/dashboard directory
             std::filesystem::create_directories("logs/dashboard");
 
-            // Generate unique dashboard filename
-            std::string dashboard_file = "logs/dashboard/dashboard_" +
+            // Generate unique dashboard filename with mode and strategy prefix
+            // Format: dashboard_mock_SIGOR_2025-10-21_20251021_005642.html
+            std::string strategy_name = (config.strategy == StrategyType::SIGOR) ? "SIGOR" : "EWRLS";
+            std::string dashboard_file = "logs/dashboard/dashboard_mock_" + strategy_name + "_" +
                                         test_date + "_" + std::string(timestamp) + ".html";
 
             generate_dashboard(
@@ -776,7 +900,10 @@ int run_mock_mode(Config& config) {
                 config.data_dir,
                 config.capital,
                 test_date,
-                test_date  // Single day: start = end
+                test_date,  // Single day: start = end
+                (config.strategy == StrategyType::SIGOR
+                    ? std::string("config/sigor_params.json")
+                    : std::string("config/trading_params.json"))  // Strategy-specific
             );
         }
 
@@ -821,11 +948,11 @@ int main(int argc, char* argv[]) {
     // SANITY CHECKS
     // ========================================
 
-    // 1. Validate simulation period (minimum 1 day)
-    if (config.sim_days < 1) {
-        std::cerr << "❌ ERROR: Simulation period must be at least 1 day (got: "
+    // 1. Validate simulation period (allow 0 days for warmup-only mode)
+    if (config.sim_days < 0) {
+        std::cerr << "❌ ERROR: Simulation period cannot be negative (got: "
                   << config.sim_days << ")\n";
-        std::cerr << "   Use --sim-days N where N >= 1\n";
+        std::cerr << "   Use --sim-days N where N >= 0\n";
         return 1;
     }
 
@@ -844,7 +971,16 @@ int main(int argc, char* argv[]) {
     std::cout << "╔════════════════════════════════════════════════════════════╗\n";
     std::cout << "║         Sentio Lite - Rotation Trading System             ║\n";
     std::cout << "╚════════════════════════════════════════════════════════════╝\n";
-    std::cout << "\n";
+
+    // Print loaded trading configuration (path depends on strategy)
+    if (config.strategy == StrategyType::SIGOR) {
+        std::string path_used = std::filesystem::exists("config/sigor_trading_params.json")
+            ? "config/sigor_trading_params.json"
+            : "config/trading_params.json";
+        trading::ConfigLoader::print_config(config.trading, path_used);
+    } else {
+        trading::ConfigLoader::print_config(config.trading, "config/trading_params.json");
+    }
 
     // Print configuration
     std::cout << "Configuration:\n";
@@ -861,14 +997,12 @@ int main(int argc, char* argv[]) {
     }
     std::cout << "\n";
 
+    std::cout << "  Warmup Period: " << config.warmup_bars << " bars (ends at bar 391 of prev day)\n";
     std::cout << "  Simulation Period: " << config.sim_days << " days ("
               << config.sim_bars << " bars)\n";
-    std::cout << "  Warmup Period: 1 day (" << config.warmup_bars << " bars) [fixed]\n";
     std::cout << "  Initial Capital: $" << std::fixed << std::setprecision(2)
               << config.capital << "\n";
     std::cout << "  Max Positions: " << config.trading.max_positions << "\n";
-    std::cout << "  Stop Loss: " << (config.trading.stop_loss_pct * 100) << "%\n";
-    std::cout << "  Profit Target: " << (config.trading.profit_target_pct * 100) << "%\n";
 
     if (config.generate_dashboard) {
         std::cout << "  Dashboard: Enabled\n";
@@ -877,6 +1011,9 @@ int main(int argc, char* argv[]) {
 
     // Run appropriate mode
     if (config.mode == TradingMode::MOCK) {
+        return run_mock_mode(config);
+    } else if (config.mode == TradingMode::MOCK_LIVE) {
+        // Mock-live currently shares mock path; later can integrate streaming bridge
         return run_mock_mode(config);
     } else {
         return run_live_mode(config);

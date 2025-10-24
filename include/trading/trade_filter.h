@@ -49,9 +49,6 @@ public:
         double exit_confidence_threshold;            // Exit if confidence drops below 40%
         double profit_target_multiple;               // Exit at 2x expected return
 
-        // Emergency stop loss (overrides min hold)
-        double emergency_stop_loss_pct;    // -1% stop loss
-
         Config()
             : min_bars_to_hold(5)                // Reduced from 10 to allow more flexibility
             , typical_hold_period(20)
@@ -63,8 +60,7 @@ public:
             , min_confidence_for_entry(0.5)      // 50% (was 60%)
             , exit_signal_reversed_threshold(-0.001)   // Exit if signal reverses to -10bps (was -5bps, too sensitive)
             , exit_confidence_threshold(0.25)          // Exit if confidence drops below 25% (was 40%, too strict)
-            , profit_target_multiple(2.0)
-            , emergency_stop_loss_pct(-0.01) {}
+            , profit_target_multiple(2.0) {}
     };
 
     /**

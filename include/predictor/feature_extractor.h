@@ -9,30 +9,33 @@
 namespace trading {
 
 /**
- * Enhanced Feature Extractor - 54 Features (42 Technical + 12 Regime)
+ * Enhanced Feature Extractor - 75 Features (Based on online_trader v2.0 - 5.41% MRD)
  *
- * Extracts comprehensive set of proven technical indicators for online learning:
- * - 8 Time features (cyclical encoding: hour, minute, day-of-week, day-of-month)
- * - Multi-timeframe momentum (1, 3, 5, 10 bars)
- * - Volatility measures (realized vol, ATR)
- * - Volume analysis (surge, relative volume)
- * - Price position indicators (range position, channel position)
- * - Trend strength (RSI-like, directional momentum)
- * - Interaction terms (momentum * volatility, etc.)
- * - Mean reversion indicators (deviation from MA at 5, 10, 20 periods)
- * - Bollinger Bands (6 features)
- * - Regime features (12 features: HMM states, vol regimes, microstructure)
+ * CRITICAL: Uses RAW ABSOLUTE VALUES + normalized ratios (not ratios only!)
+ * This matches online_trader v2.0's winning feature set that achieved 5.41% MRD.
+ *
+ * Feature composition:
+ * - 8 Time features (cyclical encoding)
+ * - 21 RAW ABSOLUTE features (CRITICAL - added from online_trader v2.0):
+ *   * 4 Raw OHLC (close, open, high, low)
+ *   * 6 Raw Moving Averages (SMA10, SMA20, SMA50, EMA10, EMA20, EMA50)
+ *   * 4 Raw Bollinger Bands (mean, upper, lower, std_dev)
+ *   * 1 Raw ATR (absolute volatility)
+ *   * 2 Raw Volume (volume, OBV approximation)
+ *   * 4 Raw Price Metrics (range, body, upper_wick, lower_wick)
+ * - 34 Normalized/ratio features (existing features - kept for compatibility)
+ * - 12 Regime features (HMM states, vol regimes, microstructure)
  *
  * Optimized for:
+ * - EWRLS learning with price-dependent patterns
  * - O(1) incremental updates via CircularBuffer
  * - Minimal memory footprint (50-bar lookback)
- * - Production-ready stability (handles edge cases)
  */
 class FeatureExtractor {
 public:
     // Public constants for feature dimensions
     static constexpr size_t LOOKBACK = 50;      // Lookback window size
-    static constexpr size_t NUM_FEATURES = 54;  // 8 time + 28 technical + 6 BB + 12 regime
+    static constexpr size_t NUM_FEATURES = 75;  // 8 time + 21 raw + 34 normalized + 12 regime
 
     FeatureExtractor();
 
@@ -107,6 +110,11 @@ private:
         double bandwidth = 0.0;
     };
     BollingerBands calculate_bollinger_bands(const std::vector<Price>& prices, int period = 20, double k = 2.0) const;
+
+    // RAW ABSOLUTE VALUE CALCULATIONS (from online_trader v2.0)
+    double calculate_sma(const std::vector<Price>& prices, int period) const;
+    double calculate_ema(const std::vector<Price>& prices, int period) const;
+    double calculate_obv_approx(const std::vector<Bar>& bars) const;
 
     // Utility helpers
     std::vector<Price> get_closes() const;
