@@ -19,6 +19,10 @@
 #include <filesystem>
 #include <set>
 #include <deque>
+#ifdef ENABLE_ZMQ
+#include <zmq.h>
+#include <zmq.hpp>
+#endif
 
 using namespace trading;
 

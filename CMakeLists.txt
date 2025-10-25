@@ -40,14 +40,33 @@ find_package(Threads REQUIRED)
 # Optional: ZeroMQ for live ZMQ feed
 option(ENABLE_ZMQ "Enable ZeroMQ-based live feed" OFF)
 if(ENABLE_ZMQ)
+    # Try config package first
     find_package(ZeroMQ QUIET)
     if(ZeroMQ_FOUND)
         message(STATUS "ZeroMQ found: enabling ZMQ live feed")
         set(HAVE_ZMQ TRUE)
     else()
-        message(WARNING "ZeroMQ not found: disabling ZMQ live feed")
-        set(HAVE_ZMQ FALSE)
-        set(ENABLE_ZMQ OFF)
+        # Fallback to manual Homebrew-style discovery
+        message(STATUS "ZeroMQ config not found, trying manual discovery...")
+        # Common Homebrew prefix on Apple Silicon
+        set(ZMQ_HINT_INC "/opt/homebrew/include")
+        set(ZMQ_HINT_LIB "/opt/homebrew/lib")
+        find_path(ZMQ_INCLUDE_DIR NAMES zmq.h HINTS ${ZMQ_HINT_INC})
+        find_path(CPPZMQ_INCLUDE_DIR NAMES zmq.hpp HINTS ${ZMQ_HINT_INC})
+        find_library(ZMQ_LIBRARY NAMES zmq HINTS ${ZMQ_HINT_LIB})
+        if(ZMQ_INCLUDE_DIR AND CPPZMQ_INCLUDE_DIR AND ZMQ_LIBRARY)
+            add_library(ZeroMQ::ZeroMQ UNKNOWN IMPORTED)
+            set_target_properties(ZeroMQ::ZeroMQ PROPERTIES
+                IMPORTED_LOCATION ${ZMQ_LIBRARY}
+                INTERFACE_INCLUDE_DIRECTORIES "${ZMQ_INCLUDE_DIR};${CPPZMQ_INCLUDE_DIR}"
+            )
+            set(HAVE_ZMQ TRUE)
+            message(STATUS "ZeroMQ found via manual discovery")
+        else()
+            message(WARNING "ZeroMQ not found: disabling ZMQ live feed")
+            set(HAVE_ZMQ FALSE)
+            set(ENABLE_ZMQ OFF)
+        endif()
     endif()
 endif()
 
