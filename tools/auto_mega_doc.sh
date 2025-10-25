@@ -17,10 +17,10 @@
 # 3. Generate a mega document in the megadocs/ folder
 # 4. Show a preview of the created document
 #
-# Document patterns searched:
-# - *BUG*.md, *REVIEW*.md, *ANALYSIS*.md, *REQUIREMENTS*.md
-# - *DESIGN*.md, *ARCHITECTURE*.md, *DETAILED*.md, *CRITICAL*.md
-# - *FIX*.md, *REPORT*.md
+# Document selection:
+# - Scan all *.md files in the repository
+# - Exclude already-generated mega docs (filenames containing _MEGA)
+# - Exclude the megadocs/ output directory
 #
 # Source module patterns detected:
 # - include/path/file.h, src/path/file.cpp, tools/script.py
@@ -93,38 +93,23 @@ check_has_source_modules() {
 # Function to find the most recent document
 find_most_recent_doc() {
     local project_root="$1"
-    
-    # Document patterns to look for
-    local patterns=(
-        "*BUG*.md"
-        "*REVIEW*.md"
-        "*ANALYSIS*.md"
-        "*REQUIREMENTS*.md"
-        "*DESIGN*.md"
-        "*ARCHITECTURE*.md"
-        "*DETAILED*.md"
-        "*CRITICAL*.md"
-        "*FIX*.md"
-        "*REPORT*.md"
-    )
-    
     local all_docs=()
-    
-    # Find all matching documents
-    for pattern in "${patterns[@]}"; do
-        while IFS= read -r -d '' file; do
-            all_docs+=("$file")
-        done < <(find "$project_root" -name "$pattern" -type f -print0)
-    done
-    
+
+    # Collect all *.md excluding megadocs/ and any file with _MEGA in the name
+    while IFS= read -r -d '' file; do
+        all_docs+=("$file")
+    done < <(find "$project_root" -type f -name "*.md" \
+             -not -path "*/megadocs/*" \
+             -not -name "*_MEGA*.md" -print0)
+
     if [ ${#all_docs[@]} -eq 0 ]; then
         return 1
     fi
-    
+
     # Sort by modification time (most recent first)
     local most_recent=""
     local most_recent_time=0
-    
+
     for doc in "${all_docs[@]}"; do
         local mod_time=$(stat -f "%m" "$doc" 2>/dev/null || stat -c "%Y" "$doc" 2>/dev/null)
         if [ "$mod_time" -gt "$most_recent_time" ]; then
@@ -132,7 +117,7 @@ find_most_recent_doc() {
             most_recent="$doc"
         fi
     done
-    
+
     echo "$most_recent"
 }
 
@@ -150,8 +135,7 @@ main() {
     
     local recent_doc
     if ! recent_doc=$(find_most_recent_doc "$project_root"); then
-        print_error "No recent bug report, review, or analysis documents found!"
-        print_info "Looking for patterns: *BUG*.md, *REVIEW*.md, *ANALYSIS*.md, *REQUIREMENTS*.md, etc."
+        print_error "No markdown documents found (excluding megadocs and *_MEGA*.md)!"
         exit 1
     fi
     
