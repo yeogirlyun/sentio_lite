@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
 SIGOR Combined Optimization with Optuna
-Optimizes BOTH detector weights AND window sizes simultaneously to maximize MRD
+Optimizes BOTH detector weights AND window sizes while enforcing generalization.
 
-Uses Optuna's TPE sampler for efficient hyperparameter search
-Total parameters: 13 (7 weights + 6 windows)
+Protocol:
+- Evaluation set: 5 most recent trading days up to --end-date (inclusive)
+- Validation set: 10 trading days prior to the evaluation period
+- Constraint: validation_avg_mrd must be within (1 - overfitting_threshold) of evaluation_avg_mrd
+
+Objective: Maximize evaluation_avg_mrd subject to the validation constraint.
 """
 
 import json
@@ -12,22 +16,19 @@ import subprocess
 import optuna
 from typing import Dict, List, Tuple
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 import numpy as np
-
-# Optimization configuration
-TRAIN_DATES = ["2025-10-14", "2025-10-15", "2025-10-16", "2025-10-17", "2025-10-18"]
-VAL_DATES = ["2025-10-20", "2025-10-21", "2025-10-22", "2025-10-23", "2025-10-24"]
 
 CONFIG_FILE = "config/sigor_params.json"
 BACKUP_FILE = "config/sigor_params.json.bak"
 RESULTS_FILE = "results/combined_optimization/optuna_results.json"
 
 class SigorCombinedOptimizer:
-    def __init__(self, train_dates: List[str], val_dates: List[str], n_trials: int = 200):
-        self.train_dates = train_dates
+    def __init__(self, eval_dates: List[str], val_dates: List[str], n_trials: int = 200, overfitting_threshold: float = 0.20):
+        self.eval_dates = eval_dates
         self.val_dates = val_dates
         self.n_trials = n_trials
+        self.overfitting_threshold = overfitting_threshold
         self.sentio_bin = "./build/sentio_lite"
 
         # Track all results
@@ -36,11 +37,11 @@ class SigorCombinedOptimizer:
         print("=" * 80)
         print("SIGOR COMBINED OPTIMIZATION - Weights + Windows - Optuna TPE Sampler")
         print("=" * 80)
-        print(f"  Training dates: {', '.join(train_dates)}")
-        print(f"  Validation dates: {', '.join(val_dates)}")
+        print(f"  Evaluation dates (5): {', '.join(eval_dates)}")
+        print(f"  Validation dates (10): {', '.join(val_dates)}")
         print(f"  Trials: {n_trials}")
-        print(f"  Strategy: Optimize 7 weights + 6 windows (13 parameters total)")
-        print(f"  Target: Maximize average MRD on validation set")
+        print(f"  Strategy: Optimize 8 weights + 9 windows (17 parameters total, including AWR)")
+        print(f"  Target: Maximize evaluation MRD with validation within {int(self.overfitting_threshold*100)}%")
         print("=" * 80)
         print()
 
@@ -108,9 +109,9 @@ class SigorCombinedOptimizer:
         return avg_mrd, total_trades
 
     def objective(self, trial: optuna.Trial) -> float:
-        """Optuna objective function - returns average MRD on validation set"""
+        """Optuna objective: maximize evaluation MRD subject to validation constraint."""
 
-        # Sample BOTH weights AND windows
+        # Sample BOTH weights AND windows (8 detectors including AWR)
         params = {
             # Detector weights
             'w_boll': trial.suggest_float('w_boll', 0.1, 2.0, step=0.1),
@@ -120,6 +121,7 @@ class SigorCombinedOptimizer:
             'w_orb': trial.suggest_float('w_orb', 0.1, 1.5, step=0.1),
             'w_ofi': trial.suggest_float('w_ofi', 0.1, 1.5, step=0.1),
             'w_vol': trial.suggest_float('w_vol', 0.1, 1.5, step=0.1),
+            'w_awr': trial.suggest_float('w_awr', 0.1, 2.0, step=0.1),
 
             # Window sizes
             'win_boll': trial.suggest_int('win_boll', 10, 50),
@@ -128,6 +130,9 @@ class SigorCombinedOptimizer:
             'win_vwap': trial.suggest_int('win_vwap', 10, 50),
             'orb_opening_bars': trial.suggest_int('orb_opening_bars', 10, 60),
             'vol_window': trial.suggest_int('vol_window', 10, 50),
+            'win_awr_williams': trial.suggest_int('win_awr_williams', 5, 30),
+            'win_awr_rsi': trial.suggest_int('win_awr_rsi', 5, 30),
+            'win_awr_bb': trial.suggest_int('win_awr_bb', 10, 50),
         }
 
         print(f"\n  Trial {trial.number + 1}/{self.n_trials}:")
@@ -136,22 +141,35 @@ class SigorCombinedOptimizer:
         print(f"    Windows: boll={params['win_boll']}, rsi={params['win_rsi']}, "
               f"mom={params['win_mom']}, vwap={params['win_vwap']}")
 
-        # Evaluate on validation set
+        # Evaluate on evaluation and validation sets
+        eval_mrd, eval_trades = self.evaluate_params(params, self.eval_dates)
         val_mrd, val_trades = self.evaluate_params(params, self.val_dates)
 
-        print(f"    Val MRD: {val_mrd:.3f}%, Trades: {val_trades}")
+        print(f"    Eval MRD: {eval_mrd:.3f}%, Trades: {eval_trades}")
+        print(f"    Val  MRD: {val_mrd:.3f}%, Trades: {val_trades}")
+
+        # Validation must be within allowed degradation of evaluation
+        if eval_mrd > 0:
+            passes = val_mrd >= (1.0 - self.overfitting_threshold) * eval_mrd
+        else:
+            # If eval <= 0, require validation not worse than evaluation
+            passes = val_mrd >= eval_mrd
 
         # Store results
         trial_result = {
             'trial': trial.number,
             'params': params.copy(),
+            'eval_mrd': eval_mrd,
+            'eval_trades': eval_trades,
             'val_mrd': val_mrd,
-            'val_trades': val_trades
+            'val_trades': val_trades,
+            'passes_validation': passes
         }
         self.all_results.append(trial_result)
 
-        # Return validation MRD (Optuna will maximize)
-        return val_mrd
+        if not passes:
+            return -999.0
+        return eval_mrd
 
     def run_optimization(self):
         """Run Optuna optimization"""
@@ -174,15 +192,25 @@ class SigorCombinedOptimizer:
 
         best_trial = study.best_trial
         print(f"  Trial number: {best_trial.number}")
-        print(f"  Validation MRD: {best_trial.value:.3f}%")
+        # Retrieve best eval/val MRD for reporting
+        matched = next((r for r in self.all_results if r['trial'] == best_trial.number), None)
+        if matched:
+            best_eval_mrd = matched['eval_mrd']
+            best_val_mrd = matched['val_mrd']
+        else:
+            best_eval_mrd = best_trial.value
+            best_val_mrd, _ = self.evaluate_params(best_trial.params, self.val_dates)
+        print(f"  Evaluation MRD: {best_eval_mrd:.3f}%")
+        print(f"  Validation MRD: {best_val_mrd:.3f}%")
 
         print(f"\n  Detector Weights:")
-        for key in ['w_boll', 'w_rsi', 'w_mom', 'w_vwap', 'w_orb', 'w_ofi', 'w_vol']:
+        for key in ['w_boll', 'w_rsi', 'w_mom', 'w_vwap', 'w_orb', 'w_ofi', 'w_vol', 'w_awr']:
             if key in best_trial.params:
                 print(f"    {key}: {best_trial.params[key]:.1f}")
 
         print(f"\n  Window Sizes:")
-        for key in ['win_boll', 'win_rsi', 'win_mom', 'win_vwap', 'orb_opening_bars', 'vol_window']:
+        for key in ['win_boll', 'win_rsi', 'win_mom', 'win_vwap', 'orb_opening_bars', 'vol_window',
+                    'win_awr_williams', 'win_awr_rsi', 'win_awr_bb']:
             if key in best_trial.params:
                 print(f"    {key}: {best_trial.params[key]}")
 
@@ -199,20 +227,26 @@ class SigorCombinedOptimizer:
             "w_orb": self.original_config["parameters"]["w_orb"],
             "w_ofi": self.original_config["parameters"]["w_ofi"],
             "w_vol": self.original_config["parameters"]["w_vol"],
+            "w_awr": self.original_config["parameters"]["w_awr"],
             "win_boll": self.original_config["parameters"]["win_boll"],
             "win_rsi": self.original_config["parameters"]["win_rsi"],
             "win_mom": self.original_config["parameters"]["win_mom"],
             "win_vwap": self.original_config["parameters"]["win_vwap"],
             "orb_opening_bars": self.original_config["parameters"]["orb_opening_bars"],
             "vol_window": self.original_config["parameters"]["vol_window"],
+            "win_awr_williams": self.original_config["parameters"]["win_awr_williams"],
+            "win_awr_rsi": self.original_config["parameters"]["win_awr_rsi"],
+            "win_awr_bb": self.original_config["parameters"]["win_awr_bb"],
         }
 
         print(f"  Baseline params: {baseline_params}")
+        baseline_eval_mrd, _ = self.evaluate_params(baseline_params, self.eval_dates)
         baseline_val_mrd, _ = self.evaluate_params(baseline_params, self.val_dates)
-        print(f"  Baseline Val MRD: {baseline_val_mrd:.3f}%")
+        print(f"  Baseline Eval MRD: {baseline_eval_mrd:.3f}%")
+        print(f"  Baseline Val  MRD: {baseline_val_mrd:.3f}%")
         print()
 
-        improvement = best_trial.value - baseline_val_mrd
+        improvement = best_eval_mrd - baseline_eval_mrd
         print(f"  IMPROVEMENT: {improvement:+.3f}%")
         print()
 
@@ -229,22 +263,27 @@ class SigorCombinedOptimizer:
 
         output = {
             "timestamp": datetime.now().isoformat(),
-            "train_dates": self.train_dates,
-            "val_dates": self.val_dates,
+            "evaluation_dates": self.eval_dates,
+            "validation_dates": self.val_dates,
             "n_trials": self.n_trials,
             "best_params": best_trial.params,
-            "best_val_mrd": best_trial.value,
+            "best_eval_mrd": best_eval_mrd,
+            "best_val_mrd": best_val_mrd,
             "baseline_params": baseline_params,
+            "baseline_eval_mrd": baseline_eval_mrd,
             "baseline_val_mrd": baseline_val_mrd,
             "improvement": improvement,
             "all_trials": [
                 {
                     "trial": r['trial'],
                     "params": r['params'],
+                    "eval_mrd": r['eval_mrd'],
+                    "eval_trades": r['eval_trades'],
                     "val_mrd": r['val_mrd'],
-                    "val_trades": r['val_trades']
+                    "val_trades": r['val_trades'],
+                    "passes_validation": r['passes_validation']
                 }
-                for r in sorted(self.all_results, key=lambda x: x['val_mrd'], reverse=True)[:10]
+                for r in sorted(self.all_results, key=lambda x: (x['passes_validation'], x['eval_mrd']), reverse=True)[:10]
             ]
         }
 
@@ -284,25 +323,33 @@ class SigorCombinedOptimizer:
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Optimize SIGOR weights + windows with Optuna")
-    parser.add_argument("--trials", type=int, default=200,
-                      help="Number of Optuna trials (default: 200)")
+    def get_trading_days(end_date: str, n_days: int) -> List[str]:
+        end = datetime.strptime(end_date, "%Y-%m-%d")
+        days: List[str] = []
+        cur = end
+        while len(days) < n_days:
+            if cur.weekday() < 5:
+                days.append(cur.strftime("%Y-%m-%d"))
+            cur -= timedelta(days=1)
+        return list(reversed(days))
+
+    parser = argparse.ArgumentParser(description="Optimize SIGOR weights + windows with Optuna (eval/validation constrained)")
+    parser.add_argument("--end-date", required=True, help="End date YYYY-MM-DD (inclusive) for evaluation set")
+    parser.add_argument("--trials", type=int, default=200, help="Number of Optuna trials (default: 200)")
+    parser.add_argument("--overfitting-threshold", type=float, default=0.20,
+                      help="Max allowed degradation from evaluation to validation (default: 0.20)")
 
     args = parser.parse_args()
 
-    # Create optimizer
+    all_days = get_trading_days(args.end_date, 15)
+    val_dates = all_days[:10]
+    eval_dates = all_days[10:]
+
     optimizer = SigorCombinedOptimizer(
-        train_dates=TRAIN_DATES,
-        val_dates=VAL_DATES,
-        n_trials=args.trials
+        eval_dates=eval_dates,
+        val_dates=val_dates,
+        n_trials=args.trials,
+        overfitting_threshold=args.overfitting_threshold
     )
 
-    # Run optimization
     study = optimizer.run_optimization()
-
-    print(f"\n{'='*80}")
-    print(f"🎉 OPTIMIZATION COMPLETE!")
-    print(f"{'='*80}")
-    print(f"Best validation MRD: {study.best_value:.3f}%")
-    print(f"Results saved to: {RESULTS_FILE}")
-    print(f"{'='*80}\n")
