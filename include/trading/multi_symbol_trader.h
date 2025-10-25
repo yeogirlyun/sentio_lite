@@ -9,7 +9,6 @@
 #include "trading/trading_strategy.h"
 #include "strategy/sigor_strategy.h"
 #include "strategy/williams_rsi_strategy.h"
-#include "predictor/awr_predictor_adapter.h"
 #include "predictor/sigor_predictor_adapter.h"
 #include <unordered_map>
 #include <memory>

@@ -2,7 +2,7 @@
 
 #include "trading/multi_symbol_trader.h"
 #include "strategy/sigor_strategy.h"
-#include "strategy/williams_rsi_strategy.h"
+// Removed unused AWR loader and Williams RSI config
 #include <string>
 #include <fstream>
 #include <sstream>
@@ -313,46 +313,6 @@ private:
 /**
  * Load AWR strategy configuration from JSON file
  */
-class AwrConfigLoader {
-public:
-    static WilliamsRsiConfig load(const std::string& config_path = "config/awr_params.json") {
-        std::ifstream file(config_path);
-        if (!file.is_open()) {
-            // Fallback to defaults if file not found
-            return WilliamsRsiConfig();
-        }
-
-        std::string content((std::istreambuf_iterator<char>(file)),
-                           std::istreambuf_iterator<char>());
-        file.close();
-
-        WilliamsRsiConfig cfg;
-        using namespace config_loader_internal;
-        if (content.find("\"williams_period\":") != std::string::npos)
-            cfg.williams_period = parse_int_value(content, "williams_period");
-        if (content.find("\"rsi_period\":") != std::string::npos)
-            cfg.rsi_period = parse_int_value(content, "rsi_period");
-        if (content.find("\"bb_period\":") != std::string::npos)
-            cfg.bb_period = parse_int_value(content, "bb_period");
-        if (content.find("\"bb_stddev\":") != std::string::npos)
-            cfg.bb_stddev = parse_double_value(content, "bb_stddev");
-        if (content.find("\"approach_threshold\":") != std::string::npos)
-            cfg.approach_threshold = parse_int_value(content, "approach_threshold");
-        if (content.find("\"fresh_bars\":") != std::string::npos)
-            cfg.fresh_bars = parse_int_value(content, "fresh_bars");
-        if (content.find("\"lower_band_zone\":") != std::string::npos)
-            cfg.lower_band_zone = parse_double_value(content, "lower_band_zone");
-        if (content.find("\"upper_band_zone\":") != std::string::npos)
-            cfg.upper_band_zone = parse_double_value(content, "upper_band_zone");
-        if (content.find("\"crossing_strength\":") != std::string::npos)
-            cfg.crossing_strength = parse_double_value(content, "crossing_strength");
-        if (content.find("\"approaching_strength\":") != std::string::npos)
-            cfg.approaching_strength = parse_double_value(content, "approaching_strength");
-        if (content.find("\"fresh_strength\":") != std::string::npos)
-            cfg.fresh_strength = parse_double_value(content, "fresh_strength");
-
-        return cfg;
-    }
-};
+// AWR loader removed (SIGOR-only build)
 
 } // namespace trading
