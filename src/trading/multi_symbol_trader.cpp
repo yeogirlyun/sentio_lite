@@ -67,7 +67,6 @@ MultiSymbolTrader::MultiSymbolTrader(const std::vector<Symbol>& symbols,
       test_day_start_bar_(0),
       total_trades_(0),
       total_transaction_costs_(0.0),
-      current_min_prediction_(config.min_prediction_for_entry),
       daily_start_equity_(config.initial_capital),
       daily_start_trades_(0),
       daily_winning_trades_(0),
@@ -363,12 +362,8 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
             double probability = prediction_to_probability(pred.prediction.pred_2bar.prediction);
             bool is_long = pred.prediction.pred_2bar.prediction > 0;
 
-            // Apply BB amplification if data available
-            auto bar_it = market_data.find(symbol);
+            // SIGOR-only: BB amplification disabled
             double probability_with_bb = probability;
-            if (bar_it != market_data.end()) {
-                probability_with_bb = apply_bb_amplification(probability, symbol, bar_it->second, is_long);
-            }
 
             bool passes_prob = is_long ? (probability_with_bb > config_.buy_threshold)
                                        : (probability_with_bb < config_.sell_threshold);
@@ -400,79 +395,61 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
         {"SPXL", "SPXS"}, {"SPXS", "SPXL"}
     };
 
-    // Rank symbols by 5-bar predicted return (absolute value for rotation)
-    // BUT: if prediction is negative, substitute the inverse ETF instead
-    std::vector<std::pair<Symbol, double>> ranked;
-    std::set<std::string> processed_bases;  // Track base symbols to avoid duplicates
+    // Build deterministic ranked list by iterating symbols_ order
+    // If prediction is negative and inverse exists, substitute inverse and flip sign
+    std::vector<std::pair<Symbol, double>> ranked;  // (tradeable_symbol, positive_strength)
+    std::set<std::string> processed_bases;
 
-    for (const auto& [symbol, pred] : predictions) {
-        double prediction = pred.prediction.pred_2bar.prediction;
+    for (const auto& symbol : symbols_) {
+        auto p_it = predictions.find(symbol);
+        if (p_it == predictions.end()) {
+            continue;
+        }
+        double prediction = p_it->second.prediction.pred_2bar.prediction;
         Symbol tradeable_symbol = symbol;
 
-        // If prediction is negative AND symbol has an inverse pair, use the inverse instead
         if (prediction < 0) {
-            auto inverse_it = inverse_pairs.find(symbol);
-            if (inverse_it != inverse_pairs.end()) {
-                tradeable_symbol = inverse_it->second;
-                // Flip the prediction sign since we're trading the inverse
+            auto inv_it = inverse_pairs.find(symbol);
+            if (inv_it != inverse_pairs.end()) {
+                tradeable_symbol = inv_it->second;
                 prediction = -prediction;
             }
         }
 
-        // Track base symbols (e.g., if we processed TQQQ, skip SQQQ)
+        // Base key ensures only one of a pair (TQQQ/SQQQ) is processed, deterministically by lexicographic min
         std::string base_key = (tradeable_symbol < symbol) ? tradeable_symbol : symbol;
         if (processed_bases.count(base_key)) {
-            continue;  // Already processed this pair
+            continue;
         }
         processed_bases.insert(base_key);
 
-        // Only add if prediction is positive (after potential inversion)
         if (prediction > 0) {
             ranked.emplace_back(tradeable_symbol, prediction);
         }
     }
 
-    std::sort(ranked.begin(), ranked.end(),
-              [](const auto& a, const auto& b) { return a.second > b.second; });
+    // Deterministic ordering: strength desc, then symbol asc as tie-breaker
+    std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
+        if (a.second == b.second) return a.first < b.first;  // tie-break by symbol
+        return a.second > b.second;
+    });
 
-    // Get top N symbols that pass probability threshold
+    // Get top N symbols that pass thresholds
     std::vector<Symbol> top_symbols;
     for (size_t i = 0; i < ranked.size(); ++i) {
-        // Stop if we have enough symbols
-        if (top_symbols.size() >= config_.max_positions) {
-            break;
-        }
-
+        if (top_symbols.size() >= config_.max_positions) break;
         const auto& symbol = ranked[i].first;
 
-        // Get prediction for this symbol (might not be in predictions if it's an inverse)
-        const PredictionData* pred_ptr = nullptr;
-        if (predictions.count(symbol)) {
-            pred_ptr = &predictions.at(symbol);
-        } else {
-            // Symbol is an inverse - skip if we don't have its prediction
-            continue;
-        }
+        auto pred_it = predictions.find(symbol);
+        if (pred_it == predictions.end()) continue;
+        const auto& pred_data = pred_it->second;
 
-        const auto& pred_data = *pred_ptr;
-
-        // Convert prediction to probability (should always be positive after inversion logic)
         double probability = prediction_to_probability(pred_data.prediction.pred_2bar.prediction);
-
-        // Apply Bollinger Band amplification if enabled
-        bool is_long = true;  // Always long after inverse substitution
+        bool is_long = true;
         auto bar_it = market_data.find(symbol);
-        if (bar_it != market_data.end()) {
-            probability = apply_bb_amplification(probability, symbol, bar_it->second, is_long);
-        }
-
-        // Check probability threshold (only buy threshold since we're always long)
+        // SIGOR-only: BB amplification disabled
         bool passes_probability = (probability > config_.buy_threshold);
-
-        // Also check trade filter (optional, can be disabled by setting min_prediction_for_entry = 0)
-        bool passes_filter = trade_filter_->can_enter_position(
-                symbol, static_cast<int>(bars_seen_), pred_data.prediction);
-
+        bool passes_filter = trade_filter_->can_enter_position(symbol, static_cast<int>(bars_seen_), pred_data.prediction);
         if (passes_probability && passes_filter) {
             top_symbols.push_back(symbol);
         }
@@ -520,17 +497,8 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
                     continue;  // Skip this symbol (message already logged)
                 }
 
-                // Check signal confirmations (RSI, BB, Volume)
-                bool is_long = pred_data.prediction.pred_2bar.prediction > 0;
-                int confirmations = check_signal_confirmations(symbol, it->second, pred_data.features, is_long);
-                if (confirmations < config_.min_confirmations_required) {
-                    if (bars_seen_ % 100 == 0) {  // Only log occasionally to reduce noise
-                        std::cout << "  [CONFIRMATION BLOCKED] " << symbol
-                                  << " (" << confirmations << "/" << config_.min_confirmations_required << ")\n";
-                    }
-                    continue;  // Skip - insufficient confirmations
-                }
-
+                // SIGOR-only: confirmations disabled
+                
                 enter_position(symbol, it->second.close, it->second.timestamp, size, it->second.bar_id);
 
                 // Record entry with trade filter
@@ -559,7 +527,7 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
 
     // Step 2: Check if rotation is warranted (all slots filled + better signal available)
     if (config_.enable_rotation && positions_.size() >= config_.max_positions) {
-        // Find the next best signal not currently held
+        // Iterate ranked deterministically
         for (size_t i = 0; i < ranked.size(); ++i) {
             const auto& [candidate_symbol, candidate_strength] = ranked[i];
 
@@ -578,7 +546,7 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
             bool is_long = pred_data.prediction.pred_2bar.prediction > 0;
             auto bar_it = market_data.find(candidate_symbol);
             if (bar_it != market_data.end()) {
-                probability = apply_bb_amplification(probability, candidate_symbol, bar_it->second, is_long);
+                // SIGOR-only: BB amplification disabled
             }
             bool passes_probability = is_long ? (probability > config_.buy_threshold)
                                                : (probability < config_.sell_threshold);
@@ -594,7 +562,7 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
                 continue;
             }
 
-            // Find weakest current position
+            // Find weakest current position (deterministic tie-breaks inside)
             Symbol weakest = find_weakest_position(predictions);
             if (weakest.empty()) {
                 break;  // No positions to rotate
@@ -648,18 +616,7 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
                         auto entry_it = market_data.find(candidate_symbol);
                         if (entry_it != market_data.end()) {
                             if (is_position_compatible(candidate_symbol)) {
-                                // Check signal confirmations for rotation entry too
-                                bool is_long_rotation = pred_data.prediction.pred_2bar.prediction > 0;
-                                int rotation_confirmations = check_signal_confirmations(
-                                    candidate_symbol, entry_it->second, pred_data.features, is_long_rotation);
-
-                                if (rotation_confirmations < config_.min_confirmations_required) {
-                                    std::cout << "  [ROTATION BLOCKED] " << candidate_symbol
-                                              << " (confirmations: " << rotation_confirmations
-                                              << "/" << config_.min_confirmations_required << ")\n";
-                                    break;  // Don't rotate if new position doesn't meet confirmation criteria
-                                }
-
+                                // SIGOR-only: confirmations disabled
                                 enter_position(candidate_symbol, entry_it->second.close,
                                              entry_it->second.timestamp, size, entry_it->second.bar_id);
 
@@ -676,7 +633,7 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
                                 std::cout << "  [ENTRY] " << candidate_symbol
                                          << " at $" << std::fixed << std::setprecision(2)
                                          << entry_it->second.close
-                                         << " (via rotation, confirmations: " << rotation_confirmations << ")\n";
+                                         << " (via rotation)\n";
                             }
                         }
                     }
@@ -690,25 +647,7 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
         }
     }
 
-    // ADAPTIVE THRESHOLD ADJUSTMENT (after all trading decisions for this bar)
-    // Adjust current_min_prediction_ based on whether a trade was entered
-    if (trade_entered_this_bar) {
-        // Trade was entered: increase threshold to be more selective
-        current_min_prediction_ += config_.min_prediction_increase_on_trade;
-    } else {
-        // No trade: decrease threshold to allow more opportunities
-        current_min_prediction_ -= config_.min_prediction_decrease_on_no_trade;
-        // Lower bound: don't let it drop below 0.0
-        current_min_prediction_ = std::max(0.0, current_min_prediction_);
-    }
-
-    // Debug logging (every 50 bars)
-    if (bars_seen_ % 50 == 0) {
-        std::cout << "  [ADAPTIVE THRESHOLD] current_min_prediction: "
-                  << std::fixed << std::setprecision(4)
-                  << (current_min_prediction_ * 10000) << " bps"
-                  << " (trade this bar: " << (trade_entered_this_bar ? "YES" : "NO") << ")\n";
-    }
+    // Removed adaptive threshold logic (EWRLS-era), SIGOR uses probability thresholds only
 }
 
 void MultiSymbolTrader::update_positions(
@@ -1250,164 +1189,7 @@ double MultiSymbolTrader::prediction_to_probability(double prediction) const {
     return 0.5 + 0.5 * scaled;
 }
 
-MultiSymbolTrader::BBands MultiSymbolTrader::calculate_bollinger_bands(
-    const Symbol& symbol) const {
-
-    BBands bands;
-
-    // Get recent price history from price_history_
-    auto hist_it = price_history_.find(symbol);
-    if (hist_it == price_history_.end() || hist_it->second.size() < static_cast<size_t>(config_.bb_period)) {
-        return bands;
-    }
-
-    std::vector<double> closes(hist_it->second.begin(), hist_it->second.end());
-    size_t count = closes.size();
-
-    if (count < static_cast<size_t>(config_.bb_period)) {
-        return bands;  // Not enough data
-    }
-
-    // Calculate SMA (middle band)
-    double sum = 0.0;
-    for (size_t i = count - config_.bb_period; i < count; ++i) {
-        sum += closes[i];
-    }
-    bands.middle = sum / config_.bb_period;
-
-    // Calculate standard deviation
-    double sum_sq = 0.0;
-    for (size_t i = count - config_.bb_period; i < count; ++i) {
-        double diff = closes[i] - bands.middle;
-        sum_sq += diff * diff;
-    }
-    double std_dev = std::sqrt(sum_sq / config_.bb_period);
-
-    // Calculate upper and lower bands
-    bands.upper = bands.middle + (config_.bb_std_dev * std_dev);
-    bands.lower = bands.middle - (config_.bb_std_dev * std_dev);
-
-    return bands;
-}
-
-double MultiSymbolTrader::apply_bb_amplification(
-    double probability, const Symbol& symbol,
-    const Bar& bar, bool is_long) const {
-
-    if (!config_.enable_bb_amplification) {
-        return probability;  // No amplification
-    }
-
-    // Calculate BB bands
-    BBands bands = calculate_bollinger_bands(symbol);
-
-    if (bands.middle == 0.0) {
-        return probability;  // No valid bands
-    }
-
-    double current_price = bar.close;
-    double band_width = bands.upper - bands.lower;
-
-    if (band_width == 0.0) {
-        return probability;  // Invalid band width
-    }
-
-    // Calculate proximity to bands
-    // For long: boost if near lower band (oversold)
-    // For short: boost if near upper band (overbought)
-
-    if (is_long) {
-        // Distance from lower band
-        double distance_from_lower = (current_price - bands.lower) / band_width;
-
-        // If within proximity threshold of lower band, amplify
-        if (distance_from_lower < config_.bb_proximity_threshold) {
-            double boost = config_.bb_amplification_factor * (1.0 - distance_from_lower / config_.bb_proximity_threshold);
-            return std::min(0.99, probability + boost);
-        }
-    } else {
-        // Distance from upper band
-        double distance_from_upper = (bands.upper - current_price) / band_width;
-
-        // If within proximity threshold of upper band, amplify
-        if (distance_from_upper < config_.bb_proximity_threshold) {
-            double boost = config_.bb_amplification_factor * (1.0 - distance_from_upper / config_.bb_proximity_threshold);
-            return std::max(0.01, probability - boost);  // For shorts, reduce probability
-        }
-    }
-
-    return probability;
-}
-
-int MultiSymbolTrader::check_signal_confirmations(
-    const Symbol& symbol, const Bar& bar,
-    const Eigen::VectorXd& features, bool is_long) const {
-
-    if (!config_.enable_signal_confirmation) {
-        return config_.min_confirmations_required;  // Pass if disabled
-    }
-
-    int confirmations = 0;
-
-    // If using SIGOR, features may be minimal; skip confirmations to avoid OOB
-    if (config_.strategy == StrategyType::SIGOR) {
-        return config_.min_confirmations_required;  // Treat as pass under SIGOR
-    }
-
-    // === 1. RSI CONFIRMATION ===
-    // Feature index 20 is RSI (from feature_extractor.cpp line 59)
-    // RSI in [0, 1] range: 0 = extremely oversold, 1 = extremely overbought
-    double rsi = features(20);
-
-    if (is_long) {
-        // For longs, want RSI < oversold threshold (buy the dip)
-        if (rsi < config_.rsi_oversold_threshold) {
-            confirmations++;
-        }
-    } else {
-        // For shorts, want RSI > overbought threshold (sell the rip)
-        if (rsi > config_.rsi_overbought_threshold) {
-            confirmations++;
-        }
-    }
-
-    // === 2. BOLLINGER BAND CONFIRMATION ===
-    // Check if price is near band extremes (mean reversion setup)
-    BBands bands = calculate_bollinger_bands(symbol);
-
-    if (bands.middle > 0.0) {  // Valid bands
-        double band_width = bands.upper - bands.lower;
-        if (band_width > 0.0) {
-            // Calculate position within bands: 0 = lower band, 0.5 = middle, 1 = upper band
-            double bb_position = (bar.close - bands.lower) / band_width;
-
-            if (is_long) {
-                // For longs, want price near lower band (oversold)
-                // bb_position < 0.15 means within 15% of lower band
-                if (bb_position < (1.0 - config_.bb_extreme_threshold)) {
-                    confirmations++;
-                }
-            } else {
-                // For shorts, want price near upper band (overbought)
-                // bb_position > 0.85 means within 15% of upper band
-                if (bb_position > config_.bb_extreme_threshold) {
-                    confirmations++;
-                }
-            }
-        }
-    }
-
-    // === 3. VOLUME SURGE CONFIRMATION ===
-    // Feature index 15 is volume surge (from feature_extractor.cpp line 48)
-    // volume_surge > 1.0 means above average, > 1.3 means significant surge
-    double volume_surge = features(15);
-
-    if (volume_surge > config_.volume_surge_threshold) {
-        confirmations++;
-    }
-
-    return confirmations;
-}
+// Removed BB amplification and confirmations in SIGOR-only build
 
 double MultiSymbolTrader::calculate_exit_ma(const Symbol& symbol) const {
     auto ph_it = price_history_.find(symbol);
@@ -1694,20 +1476,27 @@ Symbol MultiSymbolTrader::find_weakest_position(
     Symbol weakest_symbol;
     double min_strength = std::numeric_limits<double>::max();
 
-    for (const auto& [symbol, position] : positions_) {
-        // Get current signal strength for this position
+    // Build a deterministic list of currently held symbols, sorted by symbol name
+    std::vector<Symbol> held_symbols;
+    held_symbols.reserve(positions_.size());
+    for (const auto& kv : positions_) {
+        held_symbols.push_back(kv.first);
+    }
+    std::sort(held_symbols.begin(), held_symbols.end());
+
+    for (const auto& symbol : held_symbols) {
         auto pred_it = predictions.find(symbol);
         if (pred_it == predictions.end()) {
-            continue;  // No prediction available - skip
+            continue;
         }
 
-        // Use 5-bar prediction strength (absolute value)
         double strength = std::abs(pred_it->second.prediction.pred_2bar.prediction);
 
         if (strength < min_strength) {
             min_strength = strength;
             weakest_symbol = symbol;
         }
+        // If equal strength, the sorted order by symbol keeps it deterministic (first wins)
     }
 
     return weakest_symbol;

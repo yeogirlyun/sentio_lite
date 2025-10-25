@@ -83,7 +83,7 @@ public:
         using namespace config_loader_internal;
         config.max_positions = parse_int_value(content, "max_positions");
         config.min_bars_to_learn = parse_int_value(content, "min_bars_to_learn");
-        config.lookback_window = parse_int_value(content, "lookback_window");
+        // Removed: EWRLS lookback_window
         config.bars_per_day = parse_int_value(content, "bars_per_day");
         config.win_multiplier = parse_double_value(content, "win_multiplier");
         config.loss_multiplier = parse_double_value(content, "loss_multiplier");
@@ -91,13 +91,9 @@ public:
         config.rotation_strength_delta = parse_double_value(content, "rotation_strength_delta");
         config.min_rank_strength = parse_double_value(content, "min_rank_strength");
 
-        // Multi-horizon predictor config (simplified to single 2-bar horizon)
-        config.horizon_config.lambda_2bar = parse_double_value(content, "lambda_2bar");
+        // Removed: EWRLS horizon_config
 
-        // Adaptive entry threshold config
-        config.min_prediction_for_entry = parse_double_value(content, "min_prediction_for_entry");
-        config.min_prediction_increase_on_trade = parse_double_value(content, "min_prediction_increase_on_trade");
-        config.min_prediction_decrease_on_no_trade = parse_double_value(content, "min_prediction_decrease_on_no_trade");
+        // Removed: adaptive prediction threshold (EWRLS-era)
 
         // Min hold period (prevents churning)
         if (content.find("\"min_bars_to_hold\":") != std::string::npos) {
@@ -165,14 +161,10 @@ public:
         std::cout << "  Max Positions:       " << config.max_positions << "\n";
         std::cout << "\n";
 
-        std::cout << "EWRLS Parameters (Single 2-Bar Horizon):\n";
-        std::cout << "  Lambda (2-bar):      " << config.horizon_config.lambda_2bar << "\n";
+        // Removed: EWRLS parameters section
         std::cout << "\n";
 
-        std::cout << "Entry Rules (Adaptive Threshold):\n";
-        std::cout << "  Min Prediction (Initial): " << (config.min_prediction_for_entry * 100) << "%\n";
-        std::cout << "  Increase on Trade:        +" << (config.min_prediction_increase_on_trade * 100) << "%\n";
-        std::cout << "  Decrease on No-Trade:     -" << (config.min_prediction_decrease_on_no_trade * 100) << "%\n";
+        std::cout << "Entry Rules:\n";
         std::cout << "  Min Bars to Learn:        " << config.min_bars_to_learn << " bars\n";
         std::cout << "\n";
 
@@ -183,7 +175,7 @@ public:
 
         std::cout << "Other:\n";
         std::cout << "  Initial Capital:     $" << config.initial_capital << "\n";
-        std::cout << "  Lookback Window:     " << config.lookback_window << " bars\n";
+        // Removed: Lookback Window (EWRLS)
         std::cout << "  Win Multiplier:      " << config.win_multiplier << "\n";
         std::cout << "  Loss Multiplier:     " << config.loss_multiplier << "\n";
         std::cout << "  Bars per Day:        " << config.bars_per_day << "\n";

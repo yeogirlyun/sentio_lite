@@ -40,7 +40,7 @@ struct TradingConfig {
     double initial_capital = 100000.0;
     size_t max_positions = 3;
     size_t min_bars_to_learn = 50;     // Warmup period
-    size_t lookback_window = 50;
+    // Removed: EWRLS lookback window (not used in SIGOR)
     int bars_per_day = 391;            // 9:30 AM - 4:00 PM inclusive (391 bars)
     bool eod_liquidation = true;
     double win_multiplier = 1.3;
@@ -51,9 +51,6 @@ struct TradingConfig {
     double min_prediction_for_entry = 0.002;  // Starting threshold (0.2%)
     double min_prediction_increase_on_trade = 0.0005;  // +0.05% per trade
     double min_prediction_decrease_on_no_trade = 0.0001;  // -0.01% per no-trade bar
-
-    // Multi-horizon prediction settings
-    MultiHorizonPredictor::Config horizon_config;
 
     // Trade filter settings
     TradeFilter::Config filter_config;
@@ -69,33 +66,11 @@ struct TradingConfig {
     double buy_threshold = 0.55;              // Probability threshold for entry (more reasonable)
     double sell_threshold = 0.45;             // Probability threshold for exit (symmetric)
 
-    // Bollinger Band amplification (from online_trader)
-    bool enable_bb_amplification = true;      // Boost signals near BB bands
-    int bb_period = 20;                       // BB period
-    double bb_std_dev = 2.0;                  // BB standard deviations
-    double bb_proximity_threshold = 0.30;     // Within 30% of band for boost
-    double bb_amplification_factor = 0.10;    // Boost probability by this much
-
     // Rotation strategy configuration (from online_trader)
     bool enable_rotation = true;              // Enable rank-based rotation
     double rotation_strength_delta = 0.01;    // Minimum improvement (100 bps) to rotate - was 0.002 (too aggressive)
     int rotation_cooldown_bars = 10;          // Prevent re-entry after rotation
     double min_rank_strength = 0.001;         // Minimum signal strength (10 bps) to hold
-
-    // Mean reversion predictor configuration
-    bool enable_mean_reversion_predictor = false; // Use deviation-based targets instead of raw returns (EXPERIMENTAL)
-    double reversion_factor = 0.5;                // Expected reversion strength (0.5 = 50% reversion to MA)
-    int ma_period_1bar = 5;                       // MA period for 1-bar predictions (short-term mean)
-    int ma_period_5bar = 10;                      // MA period for 5-bar predictions (medium-term mean)
-    int ma_period_10bar = 20;                     // MA period for 10-bar predictions (longer-term mean)
-
-    // Signal confirmation configuration (expert recommendation)
-    bool enable_signal_confirmation = true;       // Require multiple confirming indicators before entry
-    int min_confirmations_required = 1;           // Minimum number of confirmations needed (1-3, 1=lenient, 2=moderate, 3=strict)
-    double rsi_oversold_threshold = 0.30;         // RSI below this = oversold (bullish signal)
-    double rsi_overbought_threshold = 0.70;       // RSI above this = overbought (bearish signal)
-    double bb_extreme_threshold = 0.80;           // Within 20% of BB band = extreme (80% from center)
-    double volume_surge_threshold = 1.2;          // Volume 20% above average = surge confirmation
 
     // Price-based exit configuration (mean reversion completion)
     bool enable_price_based_exits = true;         // Exit when mean reversion completes
@@ -188,10 +163,6 @@ struct TradingConfig {
     Phase current_phase = LIVE_TRADING;  // Default to live (warmup disabled); SIGOR forces LIVE
 
     TradingConfig() {
-        // Set reasonable defaults for single 2-bar horizon
-        horizon_config.lambda_2bar = 0.98;   // 34 bar half-life (34 minutes) - responsive to recent regime shifts
-        horizon_config.min_confidence = 0.6; // Confidence threshold for entry
-
         // Set reasonable defaults for trade filter (SELECTIVE for probability-based trading)
         // INCREASED to reduce churning - signal quality should drive exits, not time
         filter_config.min_bars_to_hold = 20;   // Was 5 - too aggressive
@@ -219,7 +190,6 @@ struct DailyResults {
  * Multi-Symbol Online Trading System
  *
  * Features:
- * - Online learning per symbol (EWRLS with 25 features)
  * - Dynamic position management (max N concurrent positions)
  * - Automatic stop-loss and profit targets
  * - Adaptive position sizing based on recent performance
@@ -270,9 +240,6 @@ private:
     size_t test_day_start_bar_;  // Bar index where test day begins (for filtering test-only metrics)
     int total_trades_;
     double total_transaction_costs_;  // Track cumulative costs
-
-    // Adaptive minimum prediction threshold
-    double current_min_prediction_;  // Current min prediction threshold (adaptive)
 
     // Daily tracking (for multi-day testing)
     std::vector<DailyResults> daily_results_;

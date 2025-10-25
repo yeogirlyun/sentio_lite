@@ -64,14 +64,9 @@ public:
         file << "  \"config\": {\n";
         file << "    \"strategy_name\": \"" << get_strategy_display_name(trader.config().strategy) << "\",\n";
         file << "    \"max_positions\": " << trader.config().max_positions << ",\n";
-        file << "    \"lambda_2bar\": " << trader.config().horizon_config.lambda_2bar << ",\n";
-        file << "    \"min_prediction_for_entry\": " << trader.config().min_prediction_for_entry << ",\n";
-        file << "    \"min_prediction_increase_on_trade\": " << trader.config().min_prediction_increase_on_trade << ",\n";
-        file << "    \"min_prediction_decrease_on_no_trade\": " << trader.config().min_prediction_decrease_on_no_trade << ",\n";
         file << "    \"min_bars_to_learn\": " << trader.config().min_bars_to_learn << ",\n";
         file << "    \"bars_per_day\": " << trader.config().bars_per_day << ",\n";
         file << "    \"initial_capital\": " << trader.config().initial_capital << ",\n";
-        file << "    \"lookback_window\": " << trader.config().lookback_window << ",\n";
         file << "    \"win_multiplier\": " << trader.config().win_multiplier << ",\n";
         file << "    \"loss_multiplier\": " << trader.config().loss_multiplier << ",\n";
         file << "    \"rotation_strength_delta\": " << trader.config().rotation_strength_delta << ",\n";
