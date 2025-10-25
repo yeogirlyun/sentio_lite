@@ -83,7 +83,6 @@ set(CORE_SOURCES
     # Strategy (SIGOR + Williams %R)
     src/strategy/sigor_strategy.cpp            # Sigor rule-based ensemble (7 detectors)
     src/strategy/williams_rsi_strategy.cpp      # Williams %R + RSI Anticipatory Crossover
-     include/predictor/awr_predictor_adapter.h
 
     # Trading engine
     src/trading/multi_symbol_trader.cpp        # Multi-symbol rotation trading

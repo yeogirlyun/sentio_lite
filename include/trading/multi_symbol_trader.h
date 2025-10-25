@@ -436,26 +436,7 @@ private:
     double apply_bb_amplification(double probability, const Symbol& symbol,
                                   const Bar& bar, bool is_long) const;
 
-    /**
-     * Calculate Bollinger Bands for a symbol
-     */
-    struct BBands {
-        double middle = 0.0;
-        double upper = 0.0;
-        double lower = 0.0;
-    };
-    BBands calculate_bollinger_bands(const Symbol& symbol) const;
-
-    /**
-     * Check signal confirmation using multiple indicators (expert recommendation)
-     * @param symbol Symbol to check
-     * @param bar Current bar
-     * @param features Feature vector containing RSI, volume, etc.
-     * @param is_long True for long signals, false for short signals
-     * @return Number of confirmations (0-3: RSI, BB, Volume)
-     */
-    int check_signal_confirmations(const Symbol& symbol, const Bar& bar,
-                                   const Eigen::VectorXd& features, bool is_long) const;
+    // Removed BB-based utilities and generic confirmations (SIGOR-only)
 
     /**
      * Calculate moving average for exit detection
