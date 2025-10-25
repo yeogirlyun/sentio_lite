@@ -11,6 +11,8 @@ DATE=""
 SPEED_MS=800
 TIMEOUT=45
 MIN_SNAPSHOTS=20
+FEED="fifo"   # fifo | zmq
+ZMQ_BIND="tcp://127.0.0.1:5555"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -19,6 +21,8 @@ while [[ $# -gt 0 ]]; do
     --speed-ms) SPEED_MS="$2"; shift 2 ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
     --min-snapshots) MIN_SNAPSHOTS="$2"; shift 2 ;;
+    --feed) FEED="$2"; shift 2 ;;
+    --zmq-bind) ZMQ_BIND="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
@@ -50,8 +54,12 @@ ensure_fifo() {
 
 start_replayer() {
   local logf="logs/live/replayer_$1.log"
-  log "Starting replayer → $logf (speed=${SPEED_MS}ms)"
-  python3 scripts/replay_fifo_from_results.py --results "$RESULTS" --fifo "$FIFO" --speed-ms "$SPEED_MS" > "$logf" 2>&1 &
+  log "Starting replayer → $logf (speed=${SPEED_MS}ms, feed=${FEED})"
+  if [[ "$FEED" == "fifo" ]]; then
+    python3 scripts/replay_fifo_from_results.py --results "$RESULTS" --fifo "$FIFO" --speed-ms "$SPEED_MS" > "$logf" 2>&1 &
+  else
+    python3 tools/zmq_replay_from_results.py --results "$RESULTS" --bind "$ZMQ_BIND" --speed-ms "$SPEED_MS" > "$logf" 2>&1 &
+  fi
   echo $! > /tmp/replayer_pid
 }
 
@@ -97,7 +105,7 @@ record_failure() {
 
 run_scheme_1() {
   local name="s1"
-  ensure_fifo
+  if [[ "$FEED" == "fifo" ]]; then ensure_fifo; fi
   start_replayer "$name"
   local elog="logs/live/engine_${name}.log"
   start_engine "$elog"
@@ -117,7 +125,7 @@ run_scheme_1() {
 
 run_scheme_2() {
   local name="s2"
-  ensure_fifo
+  if [[ "$FEED" == "fifo" ]]; then ensure_fifo; fi
   start_replayer "$name"
   local elog="logs/live/engine_${name}.log"
   start_engine "$elog"
