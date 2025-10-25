@@ -334,14 +334,22 @@ if __name__ == "__main__":
         return list(reversed(days))
 
     parser = argparse.ArgumentParser(description="Optimize SIGOR weights + windows with Optuna (eval/validation constrained)")
-    parser.add_argument("--end-date", required=True, help="End date YYYY-MM-DD (inclusive) for evaluation set")
+    parser.add_argument("--end-date", required=True, help="End date MM-DD (inclusive, year fixed to 2025)")
     parser.add_argument("--trials", type=int, default=200, help="Number of Optuna trials (default: 200)")
     parser.add_argument("--overfitting-threshold", type=float, default=0.20,
                       help="Max allowed degradation from evaluation to validation (default: 0.20)")
 
     args = parser.parse_args()
 
-    all_days = get_trading_days(args.end_date, 15)
+    # Enforce 2025 and MM-DD input format
+    try:
+        full_end_date = f"2025-{args.end_date}"
+        datetime.strptime(full_end_date, "%Y-%m-%d")
+    except ValueError:
+        print("ERROR: --end-date must be in MM-DD format (e.g., 10-24), year is fixed to 2025")
+        sys.exit(1)
+
+    all_days = get_trading_days(full_end_date, 15)
     val_dates = all_days[:10]
     eval_dates = all_days[10:]
 
