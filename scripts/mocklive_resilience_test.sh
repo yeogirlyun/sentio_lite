@@ -58,13 +58,19 @@ start_replayer() {
   if [[ "$FEED" == "fifo" ]]; then
     python3 scripts/replay_fifo_from_results.py --results "$RESULTS" --fifo "$FIFO" --speed-ms "$SPEED_MS" > "$logf" 2>&1 &
   else
+    # ZMQ path: start publisher and bridge to FIFO so engine can stay unchanged
     python3 tools/zmq_replay_from_results.py --results "$RESULTS" --bind "$ZMQ_BIND" --speed-ms "$SPEED_MS" > "$logf" 2>&1 &
+    echo $! > /tmp/replayer_pid
+    # start bridge
+    python3 tools/zmq_to_fifo_bridge.py --zmq-url "$ZMQ_BIND" --fifo "$FIFO" > logs/live/bridge_$1.log 2>&1 &
+    echo $! > /tmp/bridge_pid
   fi
   echo $! > /tmp/replayer_pid
 }
 
 stop_replayer() {
   if [[ -f /tmp/replayer_pid ]]; then kill "$(cat /tmp/replayer_pid)" 2>/dev/null || true; fi
+  if [[ -f /tmp/bridge_pid ]]; then kill "$(cat /tmp/bridge_pid)" 2>/dev/null || true; fi
 }
 
 start_engine() {
