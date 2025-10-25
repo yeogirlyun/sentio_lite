@@ -1,5 +1,6 @@
 #include "strategy/sigor_strategy.h"
 #include "utils/data_loader.h"
+#include "utils/time_utils.h"
 #include <iostream>
 #include <iomanip>
 #include <map>
@@ -173,7 +174,13 @@ int main(int argc, char** argv) {
 
     for (size_t i = 0; i < bars.size(); ++i) {
         const Bar& bar = bars[i];
-        SigorSignal signal = sigor.generate_signal(bar, test_symbol);
+
+        // Calculate bar index of day
+        auto duration = bar.timestamp.time_since_epoch();
+        auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+        int bar_index_of_day = utils::get_bar_index_of_day(millis);
+
+        SigorSignal signal = sigor.generate_signal(bar, test_symbol, bar_index_of_day);
 
         // Count signal types
         if (signal.is_long) long_signals++;

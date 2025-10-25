@@ -3,6 +3,7 @@
 #include "predictor/multi_horizon_predictor.h"
 #include "strategy/sigor_strategy.h"
 #include "core/bar.h"
+#include "utils/time_utils.h"
 #include <Eigen/Dense>
 #include <string>
 #include <memory>
@@ -110,7 +111,12 @@ public:
      * @param bar Current bar data
      */
     void update_with_bar(const Bar& bar) {
-        last_signal_ = sigor_.generate_signal(bar, symbol_);
+        // Calculate bar index of day from bar timestamp
+        auto duration = bar.timestamp.time_since_epoch();
+        auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+        int bar_index_of_day = utils::get_bar_index_of_day(millis);
+
+        last_signal_ = sigor_.generate_signal(bar, symbol_, bar_index_of_day);
         has_signal_ = true;
     }
 

@@ -9,7 +9,7 @@ namespace trading {
 SigorStrategy::SigorStrategy(const SigorConfig& config)
     : config_(config) {}
 
-SigorSignal SigorStrategy::generate_signal(const Bar& bar, const std::string& symbol) {
+SigorSignal SigorStrategy::generate_signal(const Bar& bar, const std::string& symbol, int bar_index_of_day) {
     // Update history
     closes_.push_back(bar.close);
     highs_.push_back(bar.high);
@@ -21,7 +21,7 @@ SigorSignal SigorStrategy::generate_signal(const Bar& bar, const std::string& sy
     auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
     timestamps_.push_back(millis);
 
-    // Update gains/losses for RSI
+    // Update gains/losses for RSI (deprecated - kept for compatibility)
     if (closes_.size() > 1) {
         double delta = closes_.back() - closes_[closes_.size() - 2];
         gains_.push_back(std::max(0.0, delta));
@@ -53,7 +53,7 @@ SigorSignal SigorStrategy::generate_signal(const Bar& bar, const std::string& sy
     double p2 = prob_rsi_14_();
     double p3 = prob_momentum_(config_.win_mom, 50.0);
     double p4 = prob_vwap_reversion_(config_.win_vwap);
-    double p5 = prob_orb_daily_(config_.orb_opening_bars);
+    double p5 = prob_orb_daily_(bar_index_of_day, config_.orb_opening_bars);
     double p6 = prob_ofi_proxy_(bar);
     double p7 = prob_volume_surge_scaled_(config_.vol_window);
 
@@ -92,6 +92,16 @@ void SigorStrategy::reset() {
     gains_.clear();
     losses_.clear();
     bar_count_ = 0;
+
+    // Reset ORB state
+    orb_high_ = 0.0;
+    orb_low_ = 1e9;
+    last_processed_bar_index_ = -1;
+
+    // Reset RSI state
+    avg_gain_ = 0.0;
+    avg_loss_ = 0.0;
+    rsi_initialized_ = false;
 }
 
 // ===== DETECTOR IMPLEMENTATIONS =====
@@ -149,35 +159,32 @@ double SigorStrategy::prob_vwap_reversion_(int window) const {
     return clamp01(0.5 - 0.5 * std::tanh(z));
 }
 
-double SigorStrategy::prob_orb_daily_(int opening_window_bars) const {
-    if (timestamps_.empty()) return 0.5;
-
-    // Compute day bucket from epoch milliseconds to days
-    int64_t day = timestamps_.back() / 86400000LL;
-
-    // Find start index of current day
-    int start = static_cast<int>(timestamps_.size()) - 1;
-    while (start > 0 && (timestamps_[static_cast<size_t>(start - 1)] / 86400000LL) == day) {
-        --start;
+double SigorStrategy::prob_orb_daily_(int bar_index, int opening_window_bars) {
+    // bar_index is 1-based (1-391 for regular trading day)
+    if (bar_index == -1) {
+        return 0.5; // Market closed
     }
 
-    int end_open = std::min(static_cast<int>(timestamps_.size()), start + opening_window_bars);
-
-    double hi = -std::numeric_limits<double>::infinity();
-    double lo =  std::numeric_limits<double>::infinity();
-
-    for (int i = start; i < end_open; ++i) {
-        hi = std::max(hi, highs_[static_cast<size_t>(i)]);
-        lo = std::min(lo, lows_[static_cast<size_t>(i)]);
+    // Reset ORB state at start of new day (bar index 1)
+    if (bar_index == 1 || bar_index < last_processed_bar_index_) {
+        orb_high_ = 0.0;
+        orb_low_ = 1e9;
     }
-
-    if (!std::isfinite(hi) || !std::isfinite(lo)) return 0.5;
+    last_processed_bar_index_ = bar_index;
 
     double c = closes_.back();
 
-    if (c > hi) return 0.7;  // Breakout long bias
-    if (c < lo) return 0.3;  // Breakout short bias
-    return 0.5;               // Inside range
+    // During opening range window, accumulate high/low
+    if (bar_index <= opening_window_bars) {
+        orb_high_ = std::max(orb_high_, highs_.back());
+        orb_low_ = std::min(orb_low_, lows_.back());
+        return 0.5; // No signal yet during opening range
+    }
+
+    // After opening range: check for breakout
+    if (c > orb_high_) return 0.7;  // Long breakout
+    if (c < orb_low_) return 0.3;   // Short breakout
+    return 0.5;                      // Inside range
 }
 
 double SigorStrategy::prob_ofi_proxy_(const Bar& bar) const {
@@ -273,21 +280,50 @@ double SigorStrategy::compute_stddev(const std::vector<double>& v, int window, d
     return std::sqrt(acc / static_cast<double>(window));
 }
 
-double SigorStrategy::compute_rsi(int window) const {
-    if (window <= 0 || static_cast<int>(gains_.size()) < window + 1) return 50.0;
-
-    double avg_gain = 0.0, avg_loss = 0.0;
-    for (int i = static_cast<int>(gains_.size()) - window; i < static_cast<int>(gains_.size()); ++i) {
-        avg_gain += gains_[static_cast<size_t>(i)];
-        avg_loss += losses_[static_cast<size_t>(i)];
+double SigorStrategy::compute_rsi(int period) const {
+    // Wilder's RSI uses exponential smoothing (SMMA/EMA)
+    if (static_cast<int>(closes_.size()) < period + 1) {
+        return 50.0; // Not enough data
     }
 
-    avg_gain /= static_cast<double>(window);
-    avg_loss /= static_cast<double>(window);
+    // Calculate current price change
+    double current_close = closes_.back();
+    double prev_close = closes_[closes_.size() - 2];
+    double change = current_close - prev_close;
+    double gain = (change > 0) ? change : 0.0;
+    double loss = (change < 0) ? -change : 0.0;
 
-    if (avg_loss <= 1e-12) return 100.0;
+    // Mutable state is managed via member variables
+    // We need to cast away const to update state (or make compute_rsi non-const)
+    // Since header declares it const, we use const_cast (temporary workaround)
+    auto* self = const_cast<SigorStrategy*>(this);
 
-    double rs = avg_gain / avg_loss;
+    if (!self->rsi_initialized_) {
+        // First-time initialization: use SMA for initial average
+        if (static_cast<int>(closes_.size()) < period + 1) {
+            return 50.0;
+        }
+
+        double total_gain = 0.0;
+        double total_loss = 0.0;
+        for (size_t i = closes_.size() - period; i < closes_.size(); ++i) {
+            double chg = closes_[i] - closes_[i - 1];
+            total_gain += (chg > 0) ? chg : 0.0;
+            total_loss += (chg < 0) ? -chg : 0.0;
+        }
+
+        self->avg_gain_ = total_gain / period;
+        self->avg_loss_ = total_loss / period;
+        self->rsi_initialized_ = true;
+    } else {
+        // Wilder's EMA smoothing: AvgGain(t) = (AvgGain(t-1) * (Period-1) + CurrentGain) / Period
+        self->avg_gain_ = (self->avg_gain_ * (period - 1) + gain) / period;
+        self->avg_loss_ = (self->avg_loss_ * (period - 1) + loss) / period;
+    }
+
+    if (self->avg_loss_ == 0.0) return 100.0;
+
+    double rs = self->avg_gain_ / self->avg_loss_;
     return 100.0 - (100.0 / (1.0 + rs));
 }
 

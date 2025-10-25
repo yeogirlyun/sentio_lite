@@ -70,7 +70,7 @@ struct SigorSignal {
  * 7. Volume surge scaled by momentum
  *
  * Aggregation: Log-odds fusion with weighted voting
- * Target: 0.3% MRD (stable, consistent)
+ * Target: 0.5% MRD
  */
 class SigorStrategy {
 public:
@@ -78,8 +78,11 @@ public:
 
     /**
      * Generate signal from new bar
+     * @param bar Current bar data
+     * @param symbol Symbol being traded
+     * @param bar_index_of_day 1-based bar index within trading day (1-391), -1 if market closed
      */
-    SigorSignal generate_signal(const Bar& bar, const std::string& symbol);
+    SigorSignal generate_signal(const Bar& bar, const std::string& symbol, int bar_index_of_day);
 
     /**
      * Check if warmup period is complete
@@ -100,17 +103,27 @@ private:
     std::vector<double> lows_;
     std::vector<double> volumes_;
     std::vector<int64_t> timestamps_;
-    std::vector<double> gains_;    // For RSI
-    std::vector<double> losses_;   // For RSI
+    std::vector<double> gains_;    // For RSI (deprecated - kept for compatibility)
+    std::vector<double> losses_;   // For RSI (deprecated - kept for compatibility)
 
     int bar_count_ = 0;
+
+    // ORB state (per-day tracking)
+    double orb_high_ = 0.0;
+    double orb_low_ = 1e9;
+    int last_processed_bar_index_ = -1;
+
+    // RSI state (Wilder's smoothing)
+    double avg_gain_ = 0.0;
+    double avg_loss_ = 0.0;
+    bool rsi_initialized_ = false;
 
     // ===== 7 Detector Probability Functions =====
     double prob_bollinger_(const Bar& bar) const;
     double prob_rsi_14_() const;
     double prob_momentum_(int window, double scale) const;
     double prob_vwap_reversion_(int window) const;
-    double prob_orb_daily_(int opening_window_bars) const;
+    double prob_orb_daily_(int bar_index, int opening_window_bars);
     double prob_ofi_proxy_(const Bar& bar) const;
     double prob_volume_surge_scaled_(int window) const;
 
