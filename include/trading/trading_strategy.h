@@ -8,7 +8,6 @@ namespace trading {
  * Trading Strategy Type
  */
 enum class StrategyType {
-    EWRLS,   // Multi-Horizon EWRLS with rotation
     SIGOR    // Rule-based SIGOR ensemble
 };
 
@@ -16,7 +15,6 @@ enum class StrategyType {
  * Parse strategy type from string
  */
 inline StrategyType parse_strategy_type(const std::string& str) {
-    if (str == "ewrls") return StrategyType::EWRLS;
     if (str == "sigor") return StrategyType::SIGOR;
     throw std::runtime_error("Unknown strategy type: " + str);
 }
@@ -26,7 +24,6 @@ inline StrategyType parse_strategy_type(const std::string& str) {
  */
 inline std::string to_string(StrategyType strategy) {
     switch (strategy) {
-        case StrategyType::EWRLS: return "EWRLS";
         case StrategyType::SIGOR: return "SIGOR";
         default: return "Unknown";
     }
@@ -37,8 +34,6 @@ inline std::string to_string(StrategyType strategy) {
  */
 inline std::string get_strategy_display_name(StrategyType strategy) {
     switch (strategy) {
-        case StrategyType::EWRLS:
-            return "Multi-Horizon EWRLS";
         case StrategyType::SIGOR:
             return "SIGOR (Signal-OR Ensemble)";
         default:
@@ -51,8 +46,6 @@ inline std::string get_strategy_display_name(StrategyType strategy) {
  */
 inline std::string get_strategy_config_path(StrategyType strategy) {
     switch (strategy) {
-        case StrategyType::EWRLS:
-            return "config/trading_params.json";
         case StrategyType::SIGOR:
             return "config/sigor_params.json";
         default:

@@ -47,17 +47,7 @@ include_directories(${CMAKE_SOURCE_DIR}/external/nlohmann_json/include)
 # Source Files - CORRECTED AND VALIDATED
 # ============================================================================
 set(CORE_SOURCES
-    # Predictor components (robust online learning)
-    src/predictor/ewrls_predictor.cpp          # Core EWRLS with numerical stability
-    src/predictor/online_predictor.cpp         # Wrapper for 54-feature enforcement
-    src/predictor/feature_extractor.cpp        # 54-feature extractor (8 time + 34 technical + 12 regime)
-    src/predictor/regime_features.cpp          # Fast regime detection (k-means clustering)
-    src/predictor/multi_horizon_predictor.cpp  # Multi-horizon prediction (1, 5, 10 bars)
-
-    # Features (backward compatibility wrapper)
-    src/features/unified_features.cpp          # Wrapper around FeatureExtractor
-
-    # Strategy (alternative to EWRLS)
+    # Strategy (SIGOR only)
     src/strategy/sigor_strategy.cpp            # Sigor rule-based ensemble (7 detectors)
 
     # Trading engine
@@ -177,12 +167,7 @@ message(STATUS "Source files:    ${NUM_SOURCES}")
 
 message(STATUS "========================================")
 message(STATUS "Features:")
-message(STATUS "  - 33 Features (8 time + 25 technical)")
-message(STATUS "  - Multi-Horizon Prediction (1, 5, 10 bars)")
-message(STATUS "  - EWRLS with numerical stability")
-message(STATUS "  - Condition number monitoring")
-message(STATUS "  - Adaptive regularization")
-message(STATUS "  - Gradient clipping")
+message(STATUS "  - SIGOR Rule-based Ensemble (7 detectors)")
 message(STATUS "  - Multi-Symbol Rotation Trading")
 message(STATUS "  - Trade frequency management")
 message(STATUS "  - Holding period constraints (min 5 bars)")

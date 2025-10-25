@@ -64,7 +64,7 @@ class IntradayWarmupOptimizer:
             self.sentio_bin,
             "mock",
             "--date", test_date,
-            "--sim-days", "0",
+            
             "--warmup-bars", str(self.warmup_bars),
             "--intraday-warmup",
             "--no-dashboard",

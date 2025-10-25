@@ -88,20 +88,11 @@ MultiSymbolTrader::MultiSymbolTrader(const std::vector<Symbol>& symbols,
     // Initialize trade filter
     trade_filter_ = std::make_unique<TradeFilter>(config_.filter_config);
 
-    // Initialize per-symbol components based on strategy
+    // Initialize per-symbol components (SIGOR only)
     for (const auto& symbol : symbols_) {
-        if (config_.strategy == StrategyType::EWRLS) {
-            // Multi-horizon EWRLS predictor (1, 5, 10 bars ahead)
-            predictors_[symbol] = std::make_unique<MultiHorizonPredictor>(
-                symbol, config_.horizon_config);
-
-            // Feature extractor with 50-bar lookback (EWRLS only)
-            extractors_[symbol] = std::make_unique<FeatureExtractor>();
-        } else if (config_.strategy == StrategyType::SIGOR) {
             // SIGOR predictor adapter (uses bar data directly)
             sigor_predictors_[symbol] = std::make_unique<SigorPredictorAdapter>(
                 symbol, config_.sigor_config);
-        }
 
         // Trade history for adaptive sizing (both strategies)
         trade_history_[symbol] = std::make_unique<TradeHistory>(config_.trade_history_size);
@@ -204,16 +195,7 @@ void MultiSymbolTrader::on_bar(const std::unordered_map<Symbol, Bar>& market_dat
 
         const Bar& bar = it->second;
 
-        if (config_.strategy == StrategyType::EWRLS) {
-            // EWRLS: Extract features and make prediction
-            auto features = extractors_[symbol]->extract(bar);
-
-            if (features.has_value()) {
-                // Make multi-horizon prediction
-                auto pred = predictors_[symbol]->predict(features.value());
-                predictions[symbol] = {pred, features.value(), bar.close};
-            }
-        } else if (config_.strategy == StrategyType::SIGOR) {
+        if (config_.strategy == StrategyType::SIGOR) {
             // SIGOR: Update with bar and generate signal
             sigor_predictors_[symbol]->update_with_bar(bar);
 
@@ -227,90 +209,7 @@ void MultiSymbolTrader::on_bar(const std::unordered_map<Symbol, Bar>& market_dat
             }
         }
 
-        // Update EWRLS predictor with realized returns (SIGOR doesn't need this - it's rule-based)
-        if (config_.strategy == StrategyType::EWRLS && bars_seen_ > 1) {
-            auto it_pred = predictions.find(symbol);
-            if (it_pred != predictions.end()) {
-                auto& history = price_history_[symbol];
-                const auto& pred_data = it_pred->second;
-
-                double target_1bar = std::numeric_limits<double>::quiet_NaN();
-                double target_5bar = std::numeric_limits<double>::quiet_NaN();
-                double target_10bar = std::numeric_limits<double>::quiet_NaN();
-
-                if (config_.enable_mean_reversion_predictor) {
-                    // MEAN REVERSION MODE: Learn to predict reversion based on deviation from MA
-                    //
-                    // Theory: When price deviates from its moving average, it tends to revert.
-                    // If price is 2% above MA, we expect it to fall back toward the MA.
-                    // Target = actual_return to train predictor on real outcomes, but predictor
-                    // learns the pattern: "deviation → expected reversion"
-
-                    // 1-bar target: Short-term mean reversion
-                    if (history.size() >= 2) {
-                        double prev_price = history[history.size() - 2];
-                        double ma = calculate_moving_average(history, config_.ma_period_1bar);
-                        if (prev_price > 0 && !std::isnan(ma) && ma > 0) {
-                            // Actual return from t-1 to t
-                            double actual_return = (bar.close - prev_price) / prev_price;
-                            target_1bar = actual_return;
-
-                            // Note: Features already include price/MA information, so predictor
-                            // can learn the deviation→reversion relationship from the data
-                        }
-                    }
-
-                    // 5-bar target: Medium-term mean reversion
-                    if (history.size() >= 6) {
-                        double price_5bars_ago = history[history.size() - 6];
-                        double ma = calculate_moving_average(history, config_.ma_period_5bar);
-                        if (price_5bars_ago > 0 && !std::isnan(ma) && ma > 0) {
-                            double actual_return = (bar.close - price_5bars_ago) / price_5bars_ago;
-                            target_5bar = actual_return;
-                        }
-                    }
-
-                    // 10-bar target: Longer-term mean reversion
-                    if (history.size() >= 11) {
-                        double price_10bars_ago = history[history.size() - 11];
-                        double ma = calculate_moving_average(history, config_.ma_period_10bar);
-                        if (price_10bars_ago > 0 && !std::isnan(ma) && ma > 0) {
-                            double actual_return = (bar.close - price_10bars_ago) / price_10bars_ago;
-                            target_10bar = actual_return;
-                        }
-                    }
-                } else {
-                    // RAW RETURN MODE: Original behavior (predict simple returns)
-
-                    // Calculate 1-bar return
-                    if (history.size() >= 2) {
-                        double prev_price = history[history.size() - 2];
-                        if (prev_price > 0) {
-                            target_1bar = (bar.close - prev_price) / prev_price;
-                        }
-                    }
-
-                    // Calculate 5-bar return
-                    if (history.size() >= 6) {
-                        double price_5bars_ago = history[history.size() - 6];
-                        if (price_5bars_ago > 0) {
-                            target_5bar = (bar.close - price_5bars_ago) / price_5bars_ago;
-                        }
-                    }
-
-                    // Calculate 10-bar return
-                    if (history.size() >= 11) {
-                        double price_10bars_ago = history[history.size() - 11];
-                        if (price_10bars_ago > 0) {
-                            target_10bar = (bar.close - price_10bars_ago) / price_10bars_ago;
-                        }
-                    }
-                }
-
-                // Update multi-horizon predictor with targets
-                predictors_[symbol]->update(pred_data.features, target_1bar, target_5bar, target_10bar);
-            }
-        }
+        // No learning/update path in SIGOR
     }
 
     // Step 4: Update trade filter bars held counter
@@ -329,26 +228,26 @@ void MultiSymbolTrader::on_bar(const std::unordered_map<Symbol, Bar>& market_dat
         // Always trade immediately for SIGOR
         handle_live_phase(predictions, market_data);
     } else {
-        switch(config_.current_phase) {
-            case TradingConfig::WARMUP_OBSERVATION:
-                handle_observation_phase(market_data);
-                break;
+    switch(config_.current_phase) {
+        case TradingConfig::WARMUP_OBSERVATION:
+            handle_observation_phase(market_data);
+            break;
 
-            case TradingConfig::WARMUP_SIMULATION:
-                handle_simulation_phase(predictions, market_data);
-                break;
+        case TradingConfig::WARMUP_SIMULATION:
+            handle_simulation_phase(predictions, market_data);
+            break;
 
-            case TradingConfig::WARMUP_COMPLETE:
-            case TradingConfig::LIVE_TRADING:
-                handle_live_phase(predictions, market_data);
-                break;
+        case TradingConfig::WARMUP_COMPLETE:
+        case TradingConfig::LIVE_TRADING:
+            handle_live_phase(predictions, market_data);
+            break;
         }
     }
 
     // Step 7: EOD liquidation (use timestamp-based detection)
     // Detect end of day based on bar timestamp (3:59-4:00 PM ET)
     // This is more robust than modulo arithmetic which fails with missing bars
-    static int64_t last_trading_date = 0;
+    [[maybe_unused]] static int64_t last_trading_date = 0;
     static int64_t last_eod_date = 0;  // Track last EOD to prevent duplicate triggers
     int64_t current_trading_date = extract_date_from_timestamp(
         market_data.begin()->second.timestamp);
@@ -441,7 +340,6 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
     bool trade_entered_this_bar = false;
 
     // Enhanced Debug: Detailed trade analysis (every 50 bars when no positions)
-    static size_t debug_counter = 0;
     if (positions_.empty() && bars_seen_ % 50 == 0) {
         std::cout << "\n[TRADE ANALYSIS] Bar " << bars_seen_ << ":\n";
 
@@ -452,8 +350,8 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
         }
         std::sort(debug_ranked.begin(), debug_ranked.end(),
                   [](const auto& a, const auto& b) {
-                      return std::abs(a.second->prediction.pred_5bar.prediction) >
-                             std::abs(b.second->prediction.pred_5bar.prediction);
+                      return std::abs(a.second->prediction.pred_2bar.prediction) >
+                             std::abs(b.second->prediction.pred_2bar.prediction);
                   });
 
         // Show top 5 with detailed rejection reasons
@@ -462,8 +360,8 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
             const auto& pred = *debug_ranked[i].second;
 
             // Calculate probability
-            double probability = prediction_to_probability(pred.prediction.pred_5bar.prediction);
-            bool is_long = pred.prediction.pred_5bar.prediction > 0;
+            double probability = prediction_to_probability(pred.prediction.pred_2bar.prediction);
+            bool is_long = pred.prediction.pred_2bar.prediction > 0;
 
             // Apply BB amplification if data available
             auto bar_it = market_data.find(symbol);
@@ -479,8 +377,8 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
 
             std::cout << "  " << symbol
                       << " | 5-bar: " << std::fixed << std::setprecision(2)
-                      << (pred.prediction.pred_5bar.prediction * 10000) << " bps"
-                      << " | conf: " << (pred.prediction.pred_5bar.confidence * 100) << "%"
+                      << (pred.prediction.pred_2bar.prediction * 10000) << " bps"
+                      << " | conf: " << (pred.prediction.pred_2bar.confidence * 100) << "%"
                       << " | prob: " << (probability * 100) << "%"
                       << (probability_with_bb != probability ?
                           " -> " + std::to_string(int(probability_with_bb * 100)) + "% (BB)" : "")
@@ -508,7 +406,7 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
     std::set<std::string> processed_bases;  // Track base symbols to avoid duplicates
 
     for (const auto& [symbol, pred] : predictions) {
-        double prediction = pred.prediction.pred_5bar.prediction;
+        double prediction = pred.prediction.pred_2bar.prediction;
         Symbol tradeable_symbol = symbol;
 
         // If prediction is negative AND symbol has an inverse pair, use the inverse instead
@@ -559,7 +457,7 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
         const auto& pred_data = *pred_ptr;
 
         // Convert prediction to probability (should always be positive after inversion logic)
-        double probability = prediction_to_probability(pred_data.prediction.pred_5bar.prediction);
+        double probability = prediction_to_probability(pred_data.prediction.pred_2bar.prediction);
 
         // Apply Bollinger Band amplification if enabled
         bool is_long = true;  // Always long after inverse substitution
@@ -619,7 +517,7 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
                 }
 
                 // Check signal confirmations (RSI, BB, Volume)
-                bool is_long = pred_data.prediction.pred_5bar.prediction > 0;
+                bool is_long = pred_data.prediction.pred_2bar.prediction > 0;
                 int confirmations = check_signal_confirmations(symbol, it->second, pred_data.features, is_long);
                 if (confirmations < config_.min_confirmations_required) {
                     if (bars_seen_ % 100 == 0) {  // Only log occasionally to reduce noise
@@ -635,7 +533,7 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
                 trade_filter_->record_entry(
                     symbol,
                     static_cast<int>(bars_seen_),
-                    pred_data.prediction.pred_5bar.prediction,
+                    pred_data.prediction.pred_2bar.prediction,
                     it->second.close
                 );
 
@@ -647,10 +545,10 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
                          << " at $" << std::fixed << std::setprecision(2)
                          << it->second.close
                          << " | 1-bar: " << std::setprecision(4)
-                         << (pred_data.prediction.pred_1bar.prediction * 100) << "%"
-                         << " | 5-bar: " << (pred_data.prediction.pred_5bar.prediction * 100) << "%"
+                         << (pred_data.prediction.pred_2bar.prediction * 100) << "%"
+                         << " | 5-bar: " << (pred_data.prediction.pred_2bar.prediction * 100) << "%"
                          << " | conf: " << std::setprecision(2)
-                         << (pred_data.prediction.pred_5bar.confidence * 100) << "%\n";
+                         << (pred_data.prediction.pred_2bar.confidence * 100) << "%\n";
             }
         }
     }
@@ -668,8 +566,8 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
 
             // Skip if doesn't pass filters (same as entry check)
             const auto& pred_data = predictions.at(candidate_symbol);
-            double probability = prediction_to_probability(pred_data.prediction.pred_5bar.prediction);
-            bool is_long = pred_data.prediction.pred_5bar.prediction > 0;
+            double probability = prediction_to_probability(pred_data.prediction.pred_2bar.prediction);
+            bool is_long = pred_data.prediction.pred_2bar.prediction > 0;
             auto bar_it = market_data.find(candidate_symbol);
             if (bar_it != market_data.end()) {
                 probability = apply_bb_amplification(probability, candidate_symbol, bar_it->second, is_long);
@@ -695,12 +593,12 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
             }
 
             // Get weakest strength and prediction
-            double weakest_pred = predictions.at(weakest).prediction.pred_5bar.prediction;
+            double weakest_pred = predictions.at(weakest).prediction.pred_2bar.prediction;
             double weakest_strength = std::abs(weakest_pred);
 
             // CRITICAL: Only rotate if signals have SAME direction
             // Rotating from LONG → SHORT (or vice versa) is a signal reversal, not a rotation!
-            double candidate_pred = pred_data.prediction.pred_5bar.prediction;
+            double candidate_pred = pred_data.prediction.pred_2bar.prediction;
             bool same_direction = (weakest_pred > 0 && candidate_pred > 0) ||
                                  (weakest_pred < 0 && candidate_pred < 0);
 
@@ -739,7 +637,7 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
                         if (entry_it != market_data.end()) {
                             if (is_position_compatible(candidate_symbol)) {
                                 // Check signal confirmations for rotation entry too
-                                bool is_long_rotation = pred_data.prediction.pred_5bar.prediction > 0;
+                                bool is_long_rotation = pred_data.prediction.pred_2bar.prediction > 0;
                                 int rotation_confirmations = check_signal_confirmations(
                                     candidate_symbol, entry_it->second, pred_data.features, is_long_rotation);
 
@@ -756,7 +654,7 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
                                 trade_filter_->record_entry(
                                     candidate_symbol,
                                     static_cast<int>(bars_seen_),
-                                    pred_data.prediction.pred_5bar.prediction,
+                                    pred_data.prediction.pred_2bar.prediction,
                                     entry_it->second.close
                                 );
 
@@ -851,8 +749,7 @@ void MultiSymbolTrader::update_positions(
         bool should_exit = trade_filter_->should_exit_position(
             symbol,
             static_cast<int>(bars_seen_),
-            pred_data.prediction,
-            current_price
+            pred_data.prediction
         );
 
         if (should_exit) {
@@ -896,8 +793,8 @@ double MultiSymbolTrader::calculate_position_size(const Symbol& symbol, const Pr
     // where: p = win probability, q = 1-p, b = win/loss ratio
 
     // STEP 1: Extract signal quality metrics
-    double confidence = pred_data.prediction.pred_5bar.confidence;  // Use 5-bar confidence
-    double signal_strength = std::abs(pred_data.prediction.pred_5bar.prediction);
+    double confidence = pred_data.prediction.pred_2bar.confidence;  // Use 5-bar confidence
+    double signal_strength = std::abs(pred_data.prediction.pred_2bar.prediction);
 
     // STEP 2: Calculate Kelly Criterion position size
     // Use confidence as win probability
@@ -1249,21 +1146,17 @@ void MultiSymbolTrader::update_market_context(const Symbol& symbol, const Bar& b
     // In production, use actual bid/ask data
     ctx.update_spread(bar.low, bar.high);
 
-    // Update volatility using simple rolling estimate
-    // In production, use more sophisticated volatility estimation
-    // For now, keep default or calculate from recent price changes
-    // NOTE: Feature extractors are only available for EWRLS strategy
-    auto ext_it = extractors_.find(symbol);
-    if (ext_it != extractors_.end() && ext_it->second && ext_it->second->bar_count() >= 20) {
-        const auto& history = ext_it->second->history();
-        size_t count = history.size();
+    // Update volatility using simple rolling estimate from price_history_
+    auto ph_it = price_history_.find(symbol);
+    if (ph_it != price_history_.end()) {
+        const auto& closes = ph_it->second;
+        size_t count = closes.size();
         if (count >= 20) {
-            // Calculate 20-bar volatility
             double sum_returns_sq = 0.0;
             int n_returns = 0;
             for (size_t i = count - 19; i < count; ++i) {
-                if (history[i-1].close > 0) {
-                    double ret = (history[i].close - history[i-1].close) / history[i-1].close;
+                if (closes[i-1] > 0) {
+                    double ret = (closes[i] - closes[i-1]) / closes[i-1];
                     sum_returns_sq += ret * ret;
                     n_returns++;
                 }
@@ -1316,18 +1209,18 @@ double MultiSymbolTrader::prediction_to_probability(double prediction) const {
 }
 
 MultiSymbolTrader::BBands MultiSymbolTrader::calculate_bollinger_bands(
-    const Symbol& symbol, const Bar& current_bar) const {
+    const Symbol& symbol) const {
 
     BBands bands;
 
-    // Get recent price history
-    auto it = extractors_.find(symbol);
-    if (it == extractors_.end()) {
-        return bands;  // No data
+    // Get recent price history from price_history_
+    auto hist_it = price_history_.find(symbol);
+    if (hist_it == price_history_.end() || hist_it->second.size() < static_cast<size_t>(config_.bb_period)) {
+        return bands;
     }
 
-    const auto& history = it->second->history();
-    size_t count = history.size();
+    std::vector<double> closes(hist_it->second.begin(), hist_it->second.end());
+    size_t count = closes.size();
 
     if (count < static_cast<size_t>(config_.bb_period)) {
         return bands;  // Not enough data
@@ -1336,14 +1229,14 @@ MultiSymbolTrader::BBands MultiSymbolTrader::calculate_bollinger_bands(
     // Calculate SMA (middle band)
     double sum = 0.0;
     for (size_t i = count - config_.bb_period; i < count; ++i) {
-        sum += history[i].close;
+        sum += closes[i];
     }
     bands.middle = sum / config_.bb_period;
 
     // Calculate standard deviation
     double sum_sq = 0.0;
     for (size_t i = count - config_.bb_period; i < count; ++i) {
-        double diff = history[i].close - bands.middle;
+        double diff = closes[i] - bands.middle;
         sum_sq += diff * diff;
     }
     double std_dev = std::sqrt(sum_sq / config_.bb_period);
@@ -1364,7 +1257,7 @@ double MultiSymbolTrader::apply_bb_amplification(
     }
 
     // Calculate BB bands
-    BBands bands = calculate_bollinger_bands(symbol, bar);
+    BBands bands = calculate_bollinger_bands(symbol);
 
     if (bands.middle == 0.0) {
         return probability;  // No valid bands
@@ -1438,7 +1331,7 @@ int MultiSymbolTrader::check_signal_confirmations(
 
     // === 2. BOLLINGER BAND CONFIRMATION ===
     // Check if price is near band extremes (mean reversion setup)
-    BBands bands = calculate_bollinger_bands(symbol, bar);
+    BBands bands = calculate_bollinger_bands(symbol);
 
     if (bands.middle > 0.0) {  // Valid bands
         double band_width = bands.upper - bands.lower;
@@ -1475,24 +1368,19 @@ int MultiSymbolTrader::check_signal_confirmations(
 }
 
 double MultiSymbolTrader::calculate_exit_ma(const Symbol& symbol) const {
-    auto it = extractors_.find(symbol);
-    if (it == extractors_.end()) {
-        return 0.0;  // No data
+    auto ph_it = price_history_.find(symbol);
+    if (ph_it == price_history_.end()) {
+        return 0.0;
     }
-
-    const auto& history = it->second->history();
-    size_t count = history.size();
-
+    const auto& closes = ph_it->second;
+    size_t count = closes.size();
     if (count < static_cast<size_t>(config_.ma_exit_period)) {
-        return 0.0;  // Not enough data
+        return 0.0;
     }
-
-    // Calculate simple moving average
     double sum = 0.0;
     for (size_t i = count - config_.ma_exit_period; i < count; ++i) {
-        sum += history[i].close;
+        sum += closes[i];
     }
-
     return sum / config_.ma_exit_period;
 }
 
@@ -1772,7 +1660,7 @@ Symbol MultiSymbolTrader::find_weakest_position(
         }
 
         // Use 5-bar prediction strength (absolute value)
-        double strength = std::abs(pred_it->second.prediction.pred_5bar.prediction);
+        double strength = std::abs(pred_it->second.prediction.pred_2bar.prediction);
 
         if (strength < min_strength) {
             min_strength = strength;

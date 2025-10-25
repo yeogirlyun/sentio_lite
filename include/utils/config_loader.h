@@ -10,6 +10,39 @@
 
 namespace trading {
 
+namespace config_loader_internal {
+    // Shared inline helpers to avoid duplicate definitions across loaders
+    inline size_t skip_ws(const std::string& s, size_t pos) {
+        while (pos < s.length() && std::isspace(static_cast<unsigned char>(s[pos]))) pos++;
+        return pos;
+    }
+
+    inline size_t find_key_pos(const std::string& content, const std::string& key) {
+        std::string search = "\"" + key + "\":";
+        size_t pos = content.find(search);
+        if (pos == std::string::npos) {
+            throw std::runtime_error("Config parsing error: '" + key + "' not found");
+        }
+        return skip_ws(content, pos + search.length());
+    }
+
+    inline int parse_int_value(const std::string& content, const std::string& key) {
+        size_t pos = find_key_pos(content, key);
+        size_t end = pos;
+        while (end < content.length() && (std::isdigit(static_cast<unsigned char>(content[end])) || content[end] == '-')) end++;
+        if (end == pos) throw std::runtime_error("Config parsing error: invalid value for '" + key + "'");
+        return std::stoi(content.substr(pos, end - pos));
+    }
+
+    inline double parse_double_value(const std::string& content, const std::string& key) {
+        size_t pos = find_key_pos(content, key);
+        size_t end = pos;
+        while (end < content.length() && (std::isdigit(static_cast<unsigned char>(content[end])) || content[end] == '.' || content[end] == '-' || content[end] == 'e' || content[end] == 'E')) end++;
+        if (end == pos) throw std::runtime_error("Config parsing error: invalid value for '" + key + "'");
+        return std::stod(content.substr(pos, end - pos));
+    }
+}
+
 /**
  * Load trading configuration from JSON file
  *
@@ -46,38 +79,36 @@ public:
         }
 
         // Parse each parameter
-        config.max_positions = parse_int(content, "max_positions");
-        config.min_bars_to_learn = parse_int(content, "min_bars_to_learn");
-        config.lookback_window = parse_int(content, "lookback_window");
-        config.bars_per_day = parse_int(content, "bars_per_day");
-        config.win_multiplier = parse_double(content, "win_multiplier");
-        config.loss_multiplier = parse_double(content, "loss_multiplier");
-        config.initial_capital = parse_double(content, "initial_capital");
-        config.rotation_strength_delta = parse_double(content, "rotation_strength_delta");
-        config.min_rank_strength = parse_double(content, "min_rank_strength");
+        using namespace config_loader_internal;
+        config.max_positions = parse_int_value(content, "max_positions");
+        config.min_bars_to_learn = parse_int_value(content, "min_bars_to_learn");
+        config.lookback_window = parse_int_value(content, "lookback_window");
+        config.bars_per_day = parse_int_value(content, "bars_per_day");
+        config.win_multiplier = parse_double_value(content, "win_multiplier");
+        config.loss_multiplier = parse_double_value(content, "loss_multiplier");
+        config.initial_capital = parse_double_value(content, "initial_capital");
+        config.rotation_strength_delta = parse_double_value(content, "rotation_strength_delta");
+        config.min_rank_strength = parse_double_value(content, "min_rank_strength");
 
-        // Multi-horizon predictor config (4 horizons now)
-        config.horizon_config.lambda_1bar = parse_double(content, "lambda_1bar");
-        config.horizon_config.lambda_5bar = parse_double(content, "lambda_5bar");
-        config.horizon_config.lambda_10bar = parse_double(content, "lambda_10bar");
-        config.horizon_config.lambda_20bar = parse_double(content, "lambda_20bar");
+        // Multi-horizon predictor config (simplified to single 2-bar horizon)
+        config.horizon_config.lambda_2bar = parse_double_value(content, "lambda_2bar");
 
         // Adaptive entry threshold config
-        config.min_prediction_for_entry = parse_double(content, "min_prediction_for_entry");
-        config.min_prediction_increase_on_trade = parse_double(content, "min_prediction_increase_on_trade");
-        config.min_prediction_decrease_on_no_trade = parse_double(content, "min_prediction_decrease_on_no_trade");
+        config.min_prediction_for_entry = parse_double_value(content, "min_prediction_for_entry");
+        config.min_prediction_increase_on_trade = parse_double_value(content, "min_prediction_increase_on_trade");
+        config.min_prediction_decrease_on_no_trade = parse_double_value(content, "min_prediction_decrease_on_no_trade");
 
         // Min hold period (prevents churning)
         if (content.find("\"min_bars_to_hold\":") != std::string::npos) {
-            config.filter_config.min_bars_to_hold = parse_int(content, "min_bars_to_hold");
+            config.filter_config.min_bars_to_hold = parse_int_value(content, "min_bars_to_hold");
         }
 
         // Profit Target & Stop Loss (from online_trader v2.0)
         if (content.find("\"profit_target_pct\":") != std::string::npos) {
-            config.profit_target_pct = parse_double(content, "profit_target_pct");
+            config.profit_target_pct = parse_double_value(content, "profit_target_pct");
         }
         if (content.find("\"stop_loss_pct\":") != std::string::npos) {
-            config.stop_loss_pct = parse_double(content, "stop_loss_pct");
+            config.stop_loss_pct = parse_double_value(content, "stop_loss_pct");
         }
 
         // Validate: fail fast on unsupported/deprecated parameters
@@ -96,11 +127,8 @@ public:
         std::cout << "  Max Positions:       " << config.max_positions << "\n";
         std::cout << "\n";
 
-        std::cout << "EWRLS Parameters (4 Horizons):\n";
-        std::cout << "  Lambda (1-bar):      " << config.horizon_config.lambda_1bar << "\n";
-        std::cout << "  Lambda (5-bar):      " << config.horizon_config.lambda_5bar << "\n";
-        std::cout << "  Lambda (10-bar):     " << config.horizon_config.lambda_10bar << "\n";
-        std::cout << "  Lambda (20-bar):     " << config.horizon_config.lambda_20bar << "\n";
+        std::cout << "EWRLS Parameters (Single 2-Bar Horizon):\n";
+        std::cout << "  Lambda (2-bar):      " << config.horizon_config.lambda_2bar << "\n";
         std::cout << "\n";
 
         std::cout << "Entry Rules (Adaptive Threshold):\n";
@@ -125,69 +153,6 @@ public:
     }
 
 private:
-    /**
-     * Parse integer value from JSON content
-     */
-    static int parse_int(const std::string& content, const std::string& key) {
-        std::string search = "\"" + key + "\":";
-        size_t pos = content.find(search);
-        if (pos == std::string::npos) {
-            throw std::runtime_error("Config parsing error: '" + key + "' not found");
-        }
-
-        // Find the value after the colon
-        pos += search.length();
-
-        // Skip whitespace
-        while (pos < content.length() && std::isspace(content[pos])) {
-            pos++;
-        }
-
-        // Extract number
-        size_t end = pos;
-        while (end < content.length() && (std::isdigit(content[end]) || content[end] == '-')) {
-            end++;
-        }
-
-        if (end == pos) {
-            throw std::runtime_error("Config parsing error: invalid value for '" + key + "'");
-        }
-
-        return std::stoi(content.substr(pos, end - pos));
-    }
-
-    /**
-     * Parse double value from JSON content
-     */
-    static double parse_double(const std::string& content, const std::string& key) {
-        std::string search = "\"" + key + "\":";
-        size_t pos = content.find(search);
-        if (pos == std::string::npos) {
-            throw std::runtime_error("Config parsing error: '" + key + "' not found");
-        }
-
-        // Find the value after the colon
-        pos += search.length();
-
-        // Skip whitespace
-        while (pos < content.length() && std::isspace(content[pos])) {
-            pos++;
-        }
-
-        // Extract number (including decimal point and negative sign)
-        size_t end = pos;
-        while (end < content.length() &&
-               (std::isdigit(content[end]) || content[end] == '.' ||
-                content[end] == '-' || content[end] == 'e' || content[end] == 'E')) {
-            end++;
-        }
-
-        if (end == pos) {
-            throw std::runtime_error("Config parsing error: invalid value for '" + key + "'");
-        }
-
-        return std::stod(content.substr(pos, end - pos));
-    }
 
     /**
      * Validate config file doesn't contain deprecated/unsupported parameters
@@ -258,23 +223,24 @@ public:
         }
 
         // Parse each parameter
-        config.k = parse_double(content, "k");
-        config.w_boll = parse_double(content, "w_boll");
-        config.w_rsi = parse_double(content, "w_rsi");
-        config.w_mom = parse_double(content, "w_mom");
-        config.w_vwap = parse_double(content, "w_vwap");
-        config.w_orb = parse_double(content, "w_orb");
-        config.w_ofi = parse_double(content, "w_ofi");
-        config.w_vol = parse_double(content, "w_vol");
-        config.win_boll = parse_int(content, "win_boll");
-        config.win_rsi = parse_int(content, "win_rsi");
-        config.win_mom = parse_int(content, "win_mom");
-        config.win_vwap = parse_int(content, "win_vwap");
-        config.orb_opening_bars = parse_int(content, "orb_opening_bars");
-        config.vol_window = parse_int(content, "vol_window");
+        using namespace config_loader_internal;
+        config.k = parse_double_value(content, "k");
+        config.w_boll = parse_double_value(content, "w_boll");
+        config.w_rsi = parse_double_value(content, "w_rsi");
+        config.w_mom = parse_double_value(content, "w_mom");
+        config.w_vwap = parse_double_value(content, "w_vwap");
+        config.w_orb = parse_double_value(content, "w_orb");
+        config.w_ofi = parse_double_value(content, "w_ofi");
+        config.w_vol = parse_double_value(content, "w_vol");
+        config.win_boll = parse_int_value(content, "win_boll");
+        config.win_rsi = parse_int_value(content, "win_rsi");
+        config.win_mom = parse_int_value(content, "win_mom");
+        config.win_vwap = parse_int_value(content, "win_vwap");
+        config.orb_opening_bars = parse_int_value(content, "orb_opening_bars");
+        config.vol_window = parse_int_value(content, "vol_window");
         // Optional warmup_bars for SIGOR (fallback to default if missing)
         if (content.find("\"warmup_bars\":") != std::string::npos) {
-            config.warmup_bars = parse_int(content, "warmup_bars");
+            config.warmup_bars = parse_int_value(content, "warmup_bars");
         }
 
         return config;
@@ -312,69 +278,6 @@ public:
     }
 
 private:
-    /**
-     * Parse integer value from JSON content
-     */
-    static int parse_int(const std::string& content, const std::string& key) {
-        std::string search = "\"" + key + "\":";
-        size_t pos = content.find(search);
-        if (pos == std::string::npos) {
-            throw std::runtime_error("SIGOR config parsing error: '" + key + "' not found");
-        }
-
-        // Find the value after the colon
-        pos += search.length();
-
-        // Skip whitespace
-        while (pos < content.length() && std::isspace(content[pos])) {
-            pos++;
-        }
-
-        // Extract number
-        size_t end = pos;
-        while (end < content.length() && (std::isdigit(content[end]) || content[end] == '-')) {
-            end++;
-        }
-
-        if (end == pos) {
-            throw std::runtime_error("SIGOR config parsing error: invalid value for '" + key + "'");
-        }
-
-        return std::stoi(content.substr(pos, end - pos));
-    }
-
-    /**
-     * Parse double value from JSON content
-     */
-    static double parse_double(const std::string& content, const std::string& key) {
-        std::string search = "\"" + key + "\":";
-        size_t pos = content.find(search);
-        if (pos == std::string::npos) {
-            throw std::runtime_error("SIGOR config parsing error: '" + key + "' not found");
-        }
-
-        // Find the value after the colon
-        pos += search.length();
-
-        // Skip whitespace
-        while (pos < content.length() && std::isspace(content[pos])) {
-            pos++;
-        }
-
-        // Extract number (including decimal point and negative sign)
-        size_t end = pos;
-        while (end < content.length() &&
-               (std::isdigit(content[end]) || content[end] == '.' ||
-                content[end] == '-' || content[end] == 'e' || content[end] == 'E')) {
-            end++;
-        }
-
-        if (end == pos) {
-            throw std::runtime_error("SIGOR config parsing error: invalid value for '" + key + "'");
-        }
-
-        return std::stod(content.substr(pos, end - pos));
-    }
 };
 
 } // namespace trading

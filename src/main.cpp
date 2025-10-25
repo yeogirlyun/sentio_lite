@@ -36,9 +36,9 @@ struct Config {
     // Date for testing (mock mode) - SINGLE DAY ONLY
     std::string test_date;  // YYYY-MM-DD format (single test day, required)
 
-    // Training/simulation period (historical data for learning)
-    int sim_days = 0;        // Default 0 days (warmup-only by default)
-    size_t sim_bars = 0;     // Calculated from sim_days
+    // Simulation disabled (SIGOR-only)
+    int sim_days = 0;
+    size_t sim_bars = 0;
 
     // Warmup period - can be specified in bars or days
     // Default: 100 bars (from bar 291 to 391 of previous day, ending at 4:00 PM)
@@ -47,9 +47,9 @@ struct Config {
     bool intraday_warmup = false;     // True = warmup from test day itself (bars 1-N)
     size_t warmup_bars = 100;         // Actual warmup bars to use
 
-    // Strategy selection
-    StrategyType strategy = StrategyType::EWRLS;  // Default to EWRLS
-    std::string strategy_str = "ewrls";
+    // Strategy selection (SIGOR-only)
+    StrategyType strategy = StrategyType::SIGOR;
+    std::string strategy_str = "sigor";
 
     // Dashboard generation (enabled by default)
     bool generate_dashboard = true;
@@ -58,26 +58,21 @@ struct Config {
     std::string trades_file = "trades.jsonl";
     std::string dashboard_output = "trading_dashboard.html";  // Will be updated with timestamp
 
+    // Configuration directory (can be overridden via command line)
+    std::string config_dir = "config";
+
     // Trading parameters
     TradingConfig trading;
 };
 
 void print_usage(const char* program_name) {
-    std::cout << "Sentio Lite - Single-Day Trading Optimization\n\n"
-              << "Philosophy: Re-optimize every morning for TODAY'S trading session\n\n"
-              << "Data Structure:\n"
-              << "  [warmup: 1 day] + [sim: N days] + [test: 1 day]\n"
-              << "  1. Warmup: Learn from 1 day (no trading)\n"
-              << "  2. Simulation: Practice trading on N days (default: 20)\n"
-              << "  3. Test: Single day to optimize for (TODAY)\n\n"
+    std::cout << "Sentio Lite - SIGOR Intraday Trading\n\n"
+              << "Philosophy: Rule-based intraday ensemble with live/replay support\n\n"
               << "Usage: " << program_name << " mock --date YYYY-MM-DD [options]\n\n"
               << "Required Options:\n"
               << "  --date YYYY-MM-DD    Test date (single day)\n\n"
               << "Common Options:\n"
-              << "  --strategy NAME      Trading strategy: ewrls (default) or sigor\n"
-              << "                       ewrls = Multi-Horizon EWRLS predictor\n"
-              << "                       sigor = Rule-based 7-detector ensemble\n"
-              << "  --sim-days N         Simulation trading days (default: 20, use 0 for warmup-only)\n"
+              << "  (SIGOR-only build)\n"
               << "  --warmup-bars N      Warmup bars (default: 100, from previous day)\n"
               << "  --intraday-warmup    Use first N bars of TEST DAY as warmup (not prev day)\n"
               << "                       Example: --warmup-bars 50 --intraday-warmup\n"
@@ -88,7 +83,9 @@ void print_usage(const char* program_name) {
               << "  --data-dir DIR       Data directory (default: data)\n"
               << "  --extension EXT      File extension: .bin or .csv (default: .bin)\n\n"
               << "Configuration:\n"
-              << "  All trading parameters are loaded from config/trading_params.json\n"
+              << "  --config DIR         Config directory containing trading_params.json and sigor_params.json\n"
+              << "                       (default: config)\n"
+              << "  \n"
               << "  Run Optuna optimization to generate optimal config:\n"
               << "    python3 tools/optuna_5day_search.py --end-date 2025-10-23\n\n"
               << "Output Options:\n"
@@ -97,8 +94,7 @@ void print_usage(const char* program_name) {
               << "Examples:\n\n"
               << "  # Test on specific date with default 20-day simulation\n"
               << "  " << program_name << " mock --date 2025-10-21\n\n"
-              << "  # Test with 10 days of simulation\n"
-              << "  " << program_name << " mock --date 2025-10-21 --sim-days 10\n\n"
+              << "\n"
               << "  # Test without dashboard\n"
               << "  " << program_name << " mock --date 2025-10-21 --no-dashboard\n\n"
               << "  # Optimize parameters with Optuna (5-day validation)\n"
@@ -150,16 +146,7 @@ bool parse_args(int argc, char* argv[], Config& config) {
             return false;
         }
         // Strategy selection (pre-parse only)
-        else if (arg == "--strategy" && i + 1 < argc) {
-            config.strategy_str = argv[++i];
-            try {
-                config.strategy = parse_strategy_type(config.strategy_str);
-            } catch (const std::exception& e) {
-                std::cerr << "Error: " << e.what() << "\n";
-                std::cerr << "Valid strategies: ewrls, sigor\n";
-                return false;
-            }
-        }
+        // --strategy removed (SIGOR-only)
         // Data options
         else if (arg == "--data-dir" && i + 1 < argc) {
             config.data_dir = argv[++i];
@@ -174,10 +161,7 @@ bool parse_args(int argc, char* argv[], Config& config) {
         else if (arg == "--date" && i + 1 < argc) {
             config.test_date = argv[++i];
         }
-        // Simulation period (historical training data)
-        else if (arg == "--sim-days" && i + 1 < argc) {
-            config.sim_days = std::stoi(argv[++i]);
-        }
+        // Simulation period removed (SIGOR-only)
         // Warmup period (bars before test day)
         else if (arg == "--warmup-bars" && i + 1 < argc) {
             config.warmup_bars_specified = std::stoi(argv[++i]);
@@ -186,6 +170,10 @@ bool parse_args(int argc, char* argv[], Config& config) {
         // Intraday warmup (use first N bars of test day as warmup)
         else if (arg == "--intraday-warmup") {
             config.intraday_warmup = true;
+        }
+        // Configuration directory
+        else if (arg == "--config" && i + 1 < argc) {
+            config.config_dir = argv[++i];
         }
         // Output options
         else if (arg == "--no-dashboard") {
@@ -205,20 +193,23 @@ bool parse_args(int argc, char* argv[], Config& config) {
 
     // Load configuration based on selected strategy
     try {
-        if (config.strategy == StrategyType::SIGOR) {
+        {
+            // Build paths from config_dir
+            std::string trading_params_path = config.config_dir + "/trading_params.json";
+            std::string sigor_params_path = config.config_dir + "/sigor_params.json";
+            std::string sigor_trading_path = config.config_dir + "/sigor_trading_params.json";
+
             // Attempt to load full trading config from a SIGOR-specific file if it exists
-            // Fallback to EWRLS trading params if SIGOR trading file is absent
-            const std::string sigor_trading_path = "config/sigor_trading_params.json";
             if (std::filesystem::exists(sigor_trading_path)) {
                 config.trading = trading::ConfigLoader::load(sigor_trading_path);
             } else {
-                config.trading = trading::ConfigLoader::load("config/trading_params.json");
+                config.trading = trading::ConfigLoader::load(trading_params_path);
             }
             // Load SIGOR model parameters
-            config.trading.sigor_config = trading::SigorConfigLoader::load("config/sigor_params.json");
+            config.trading.sigor_config = trading::SigorConfigLoader::load(sigor_params_path);
             config.trading.strategy = StrategyType::SIGOR;
             std::cout << "\n📊 SIGOR Strategy Configuration Loaded\n";
-            trading::SigorConfigLoader::print_config(config.trading.sigor_config, "config/sigor_params.json");
+            trading::SigorConfigLoader::print_config(config.trading.sigor_config, sigor_params_path);
 
             // CRITICAL: SIGOR is rule-based and does not require warmup/simulation
             // Disable day-based warmup to avoid consuming morning bars on the test day
@@ -228,11 +219,6 @@ bool parse_args(int argc, char* argv[], Config& config) {
             config.trading.warmup.enabled = false;   // Disable warmup phases entirely
             config.trading.warmup.observation_days = 0;
             config.trading.warmup.simulation_days = 0;
-        } else {
-            // Default EWRLS
-            config.trading = trading::ConfigLoader::load("config/trading_params.json");
-            config.trading.strategy = StrategyType::EWRLS;
-            trading::ConfigLoader::print_config(config.trading, "config/trading_params.json");
         }
         config.capital = config.trading.initial_capital;
     } catch (const std::exception& e) {
@@ -243,8 +229,9 @@ bool parse_args(int argc, char* argv[], Config& config) {
     // Calculate bars
     // Warmup: Use specified bars (default 100), always ends at bar 391
     config.warmup_bars = config.warmup_bars_specified;
-    // Simulation: Calculate from days
-    config.sim_bars = config.sim_days * config.trading.bars_per_day;
+    // Simulation disabled for SIGOR
+    config.sim_days = 0;
+    config.sim_bars = 0;
 
     return true;
 }
@@ -710,12 +697,7 @@ int run_mock_mode(Config& config) {
         std::cout << "  Simulation: " << config.sim_bars << " bars (" << config.sim_days << " days)\n";
         std::cout << "  Test: " << config.trading.bars_per_day << " bars (1 day)\n";
         std::cout << "  Features: 54 features (8 time + 28 technical + 6 BB + 12 regime)\n";
-        if (config.strategy == StrategyType::EWRLS) {
-            std::cout << "  Predictor: Multi-Horizon EWRLS (1/5/10 bars, λ="
-                      << config.trading.horizon_config.lambda_1bar << "/"
-                      << config.trading.horizon_config.lambda_5bar << "/"
-                      << config.trading.horizon_config.lambda_10bar << ")\n";
-        } else if (config.strategy == StrategyType::SIGOR) {
+        if (config.strategy == StrategyType::SIGOR) {
             std::cout << "  Predictor: SIGOR (rule-based ensemble)\n";
         }
         std::cout << "  Strategy: Multi-symbol rotation (top " << config.trading.max_positions << ")\n";
@@ -898,7 +880,7 @@ int run_mock_mode(Config& config) {
 
             // Generate unique dashboard filename with mode and strategy prefix
             // Format: dashboard_mock_SIGOR_2025-10-21_20251021_005642.html
-            std::string strategy_name = (config.strategy == StrategyType::SIGOR) ? "SIGOR" : "EWRLS";
+            std::string strategy_name = "SIGOR";
             std::string dashboard_file = "logs/dashboard/dashboard_mock_" + strategy_name + "_" +
                                         test_date + "_" + std::string(timestamp) + ".html";
 
@@ -967,7 +949,7 @@ int run_live_mode(Config& config) {
         std::cout << "🔄 Checking for warmup bars (today's historical data)...\n";
 
         // Try to load warmup bars from JSON (optional - created by fetch_today_bars.py)
-        bool has_warmup = false;
+        [[maybe_unused]] bool has_warmup = false;
         const std::string warmup_file = "warmup_bars.json";
         size_t warmup_bars_loaded = 0;
 
@@ -979,22 +961,27 @@ int run_live_mode(Config& config) {
                 nlohmann::json warmup_json;
                 warmup_stream >> warmup_json;
 
-                // Feed warmup bars to trader
+                // Feed warmup bars to trader (last 50 bars per symbol)
+                // No need for perfect alignment - system handles mismatches naturally
+                constexpr size_t MIN_WARMUP_BARS = 50;
+
+                // Load last 50 bars per symbol, group by bar_id
+                std::map<int, std::unordered_map<Symbol, Bar>> bars_by_id;
+
                 for (const auto& [symbol, bars_array] : warmup_json.items()) {
-                    for (const auto& bar_data : bars_array) {
-                        // Convert Alpaca bar format to our Bar struct
+                    size_t total_bars = bars_array.size();
+                    size_t start_idx = (total_bars > MIN_WARMUP_BARS)
+                                        ? (total_bars - MIN_WARMUP_BARS)
+                                        : 0;
+
+                    for (size_t i = start_idx; i < total_bars; i++) {
+                        const auto& bar_data = bars_array[i];
+
                         Bar bar;
                         bar.symbol = symbol;
 
-                        // Parse timestamp (ISO format: "2025-10-24T09:30:00Z")
-                        std::string timestamp_str = bar_data["t"];
-                        // Simple parsing - extract timestamp_ms from ISO string
-                        // For production, use a proper ISO parser
-                        int64_t timestamp_ms = bar_data.value("t_ms", 0);  // If we added it
-                        if (timestamp_ms == 0) {
-                            // Fallback: skip if we can't parse timestamp
-                            continue;
-                        }
+                        int64_t timestamp_ms = bar_data.value("t_ms", 0);
+                        if (timestamp_ms == 0) continue;
 
                         bar.timestamp = std::chrono::system_clock::time_point(
                             std::chrono::milliseconds(timestamp_ms));
@@ -1003,23 +990,18 @@ int run_live_mode(Config& config) {
                         bar.low = bar_data["l"];
                         bar.close = bar_data["c"];
                         bar.volume = bar_data["v"];
-
-                        // Use pre-calculated bar_id from JSON (Python script handles timezone)
                         bar.bar_id = bar_data.value("bar_id", -1);
-                        if (bar.bar_id < 0) {
-                            std::cerr << "[WARNING] Missing bar_id for " << symbol << ", skipping\n";
-                            continue;
-                        }
 
-                        // Feed to trader (accumulate for snapshot)
-                        std::unordered_map<Symbol, Bar> warmup_snapshot;
-                        warmup_snapshot[symbol] = bar;
+                        if (bar.bar_id < 0) continue;
 
-                        // Process when all symbols have this bar
-                        // (simplified: process each bar individually for warmup)
-                        trader.on_bar(warmup_snapshot);
-                        warmup_bars_loaded++;
+                        bars_by_id[bar.bar_id][symbol] = bar;
                     }
+                }
+
+                // Process bars in chronological order (by bar_id)
+                for (const auto& [bar_id, snapshot] : bars_by_id) {
+                    trader.on_bar(snapshot);
+                    warmup_bars_loaded++;
                 }
 
                 has_warmup = true;
@@ -1130,7 +1112,7 @@ int run_live_mode(Config& config) {
                 //   → Skip the trade (don't enter)
                 //   → Wait for next complete snapshot
                 //   → Log warning if gaps are frequent
-                bool all_symbols_ready = true;
+                [[maybe_unused]] bool all_symbols_ready = true;
                 for (const auto& sym : config.symbols) {
                     if (market_snapshot.find(sym) == market_snapshot.end()) {
                         all_symbols_ready = false;
@@ -1138,33 +1120,24 @@ int run_live_mode(Config& config) {
                     }
                 }
 
-                // Process market snapshot when all symbols updated (no missing bars)
-                if (all_symbols_ready) {
-                    // Process bars through trader (SAME LOGIC AS MOCK MODE)
-                    // The trader will internally check if it has enough indicator lookback
-                    // before generating signals
-                    trader.on_bar(market_snapshot);
-                    snapshots_processed++;
+                // Process snapshot on every bar update (allow partial snapshots)
+                // Rationale: Some symbols have sparse prints; requiring all 12 stalls the system.
+                // The trader guards internally against missing symbols and insufficient lookback.
+                trader.on_bar(market_snapshot);
+                snapshots_processed++;
 
-                    // Process any orders generated by trader
-                    // (This is where we'd submit orders to Alpaca)
-                    // For now, the trader's internal logic handles positions
-                    // In a full implementation, we'd extract signals and submit orders
+                if (snapshots_processed % 20 == 0) {
+                    auto results = trader.get_results();
+                    double equity = trader.get_equity(market_snapshot);
+                    double return_pct = (equity - config.capital) / config.capital * 100;
 
-                    // Every N snapshots, show status
-                    if (snapshots_processed % 20 == 0) {
-                        auto results = trader.get_results();
-                        double equity = trader.get_equity(market_snapshot);
-                        double return_pct = (equity - config.capital) / config.capital * 100;
-
-                        std::cout << "\n📊 [Status Update] Snapshot " << snapshots_processed << "\n";
-                        std::cout << "   Equity: $" << std::fixed << std::setprecision(2) << equity;
-                        std::cout << " (" << std::showpos << return_pct << std::noshowpos << "%)\n";
-                        std::cout << "   Trades: " << results.total_trades;
-                        std::cout << " | Positions: " << trader.positions().size() << "\n";
-                        std::cout << "   Win Rate: " << std::setprecision(1)
-                                  << (results.win_rate * 100) << "%\n\n";
-                    }
+                    std::cout << "\n📊 [Status Update] Snapshot " << snapshots_processed << "\n";
+                    std::cout << "   Equity: $" << std::fixed << std::setprecision(2) << equity;
+                    std::cout << " (" << std::showpos << return_pct << std::noshowpos << "%)\n";
+                    std::cout << "   Trades: " << results.total_trades;
+                    std::cout << " | Positions: " << trader.positions().size() << "\n";
+                    std::cout << "   Win Rate: " << std::setprecision(1)
+                              << (results.win_rate * 100) << "%\n\n";
                 }
 
             } catch (const nlohmann::json::exception& e) {
@@ -1194,11 +1167,11 @@ int run_live_mode(Config& config) {
         }
 
         // Print results
-        std::cout << "\n";
-        std::cout << "╔════════════════════════════════════════════════════════════╗\n";
+    std::cout << "\n";
+    std::cout << "╔════════════════════════════════════════════════════════════╗\n";
         std::cout << "║                 LIVE SESSION Results                       ║\n";
-        std::cout << "╚════════════════════════════════════════════════════════════╝\n";
-        std::cout << "\n";
+    std::cout << "╚════════════════════════════════════════════════════════════╝\n";
+    std::cout << "\n";
 
         std::cout << "Session Summary:\n";
         std::cout << "  Bars Processed:     " << bars_processed << "\n";
@@ -1227,11 +1200,58 @@ int run_live_mode(Config& config) {
         }
         std::cout << "\n";
 
+        // Export results and trades for dashboard/reporting
+        try {
+            // Build symbols string
+            std::string symbols_str;
+            for (size_t i = 0; i < config.symbols.size(); ++i) {
+                symbols_str += config.symbols[i];
+                if (i < config.symbols.size() - 1) symbols_str += ",";
+            }
+
+            // Derive session date range from last_update_time timestamps
+            std::string start_date_str;
+            std::string end_date_str;
+            if (!last_update_time.empty()) {
+                auto minmax = std::minmax_element(
+                    last_update_time.begin(), last_update_time.end(),
+                    [](const auto& a, const auto& b){ return a.second < b.second; }
+                );
+                auto to_date = [](const Timestamp& ts){
+                    auto secs = std::chrono::duration_cast<std::chrono::seconds>(ts.time_since_epoch()).count();
+                    time_t t = static_cast<time_t>(secs);
+                    struct tm* tm_info = localtime(&t);
+                    char buf[11];
+                    strftime(buf, sizeof(buf), "%Y-%m-%d", tm_info);
+                    return std::string(buf);
+                };
+                start_date_str = to_date(minmax.first->second);
+                end_date_str = to_date(minmax.second->second);
+            }
+
+            // Empty filtered bars placeholder (dashboard can load from data directory)
+            std::unordered_map<Symbol, std::vector<Bar>> empty_filtered;
+
+            ResultsExporter::export_json(
+                results, trader, config.results_file,
+                symbols_str, "LIVE",
+                start_date_str, end_date_str,
+                empty_filtered
+            );
+
+            export_trades_jsonl(trader, config.trades_file);
+
+            std::cout << "\n✅ Results exported to: " << config.results_file << "\n";
+            std::cout << "✅ Trades exported to: " << config.trades_file << "\n";
+        } catch (const std::exception& e) {
+            std::cerr << "⚠️  Live export failed: " << e.what() << "\n";
+        }
+
         return 0;
 
     } catch (const std::exception& e) {
         std::cerr << "\n❌ Error in live mode: " << e.what() << "\n\n";
-        return 1;
+    return 1;
     }
 }
 
@@ -1247,13 +1267,7 @@ int main(int argc, char* argv[]) {
     // SANITY CHECKS
     // ========================================
 
-    // 1. Validate simulation period (allow 0 days for warmup-only mode)
-    if (config.sim_days < 0) {
-        std::cerr << "❌ ERROR: Simulation period cannot be negative (got: "
-                  << config.sim_days << ")\n";
-        std::cerr << "   Use --sim-days N where N >= 0\n";
-        return 1;
-    }
+    // 1. No simulation period in SIGOR-only build
 
     // 2. For MOCK mode, require --date (SINGLE DAY ONLY)
     if (config.mode == TradingMode::MOCK) {
@@ -1312,8 +1326,8 @@ int main(int argc, char* argv[]) {
     if (config.mode == TradingMode::MOCK) {
         return run_mock_mode(config);
     } else if (config.mode == TradingMode::MOCK_LIVE) {
-        // Mock-live currently shares mock path; later can integrate streaming bridge
-        return run_mock_mode(config);
+        // Mock-live uses the exact same live loop, but the FIFO is fed by a replay bridge
+        return run_live_mode(config);
     } else {
         return run_live_mode(config);
     }

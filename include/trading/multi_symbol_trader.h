@@ -2,7 +2,6 @@
 #include "core/types.h"
 #include "core/bar.h"
 #include "predictor/multi_horizon_predictor.h"
-#include "predictor/feature_extractor.h"
 #include "trading/position.h"
 #include "trading/trade_history.h"
 #include "trading/alpaca_cost_model.h"
@@ -32,7 +31,7 @@ struct PredictionData {
  */
 struct TradingConfig {
     // Strategy selection
-    StrategyType strategy = StrategyType::EWRLS;  // Default to EWRLS
+    StrategyType strategy = StrategyType::SIGOR;  // SIGOR-only
     SigorConfig sigor_config;  // SIGOR strategy parameters (used when strategy==SIGOR)
 
     double initial_capital = 100000.0;
@@ -174,12 +173,9 @@ struct TradingConfig {
     Phase current_phase = LIVE_TRADING;  // Default to live (warmup disabled); SIGOR forces LIVE
 
     TradingConfig() {
-        // Set reasonable defaults for multi-horizon (RESPONSIVE for minute-bar mean reversion)
-        // Expert recommendation: Faster lambdas needed for HFT mean reversion (not slow trend following)
-        horizon_config.lambda_1bar = 0.98;   // 34 bar half-life (34 minutes) - responsive to recent regime shifts
-        horizon_config.lambda_5bar = 0.99;   // 69 bar half-life (1.15 hours) - medium-term pattern detection
-        horizon_config.lambda_10bar = 0.995; // 138 bar half-life (2.3 hours) - longer-term trend context
-        horizon_config.min_confidence = 0.4; // Lower threshold for consistency (was 0.5)
+        // Set reasonable defaults for single 2-bar horizon
+        horizon_config.lambda_2bar = 0.98;   // 34 bar half-life (34 minutes) - responsive to recent regime shifts
+        horizon_config.min_confidence = 0.6; // Confidence threshold for entry
 
         // Set reasonable defaults for trade filter (SELECTIVE for probability-based trading)
         // INCREASED to reduce churning - signal quality should drive exits, not time
@@ -235,10 +231,6 @@ private:
         Price max_profit_price = 0.0;    // Price where max profit occurred
         bool is_long = true;             // Direction of position
     };
-
-    // Per-symbol components (EWRLS strategy)
-    std::unordered_map<Symbol, std::unique_ptr<MultiHorizonPredictor>> predictors_;
-    std::unordered_map<Symbol, std::unique_ptr<FeatureExtractor>> extractors_;
 
     // Per-symbol components (SIGOR strategy)
     std::unordered_map<Symbol, std::unique_ptr<SigorPredictorAdapter>> sigor_predictors_;
@@ -470,7 +462,7 @@ private:
         double upper = 0.0;
         double lower = 0.0;
     };
-    BBands calculate_bollinger_bands(const Symbol& symbol, const Bar& current_bar) const;
+    BBands calculate_bollinger_bands(const Symbol& symbol) const;
 
     /**
      * Check signal confirmation using multiple indicators (expert recommendation)

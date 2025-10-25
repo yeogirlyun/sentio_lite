@@ -46,86 +46,55 @@ public:
     };
 
     /**
-     * Multi-horizon prediction result
+     * Multi-horizon prediction result (simplified for 2-bar only)
      */
     struct MultiHorizonPrediction {
-        PredictionQuality pred_1bar;    // Next bar prediction
-        PredictionQuality pred_5bar;    // 5-bar cumulative prediction
-        PredictionQuality pred_10bar;   // 10-bar cumulative prediction
-        PredictionQuality pred_20bar;   // 20-bar cumulative prediction
+        PredictionQuality pred_2bar;    // 2-bar cumulative prediction
 
-        int optimal_horizon = 1;        // Best risk/reward horizon (1, 5, 10, or 20)
-        double expected_return = 0.0;   // Expected return at optimal horizon
+        int optimal_horizon = 2;        // Fixed to 2 bars
+        double expected_return = 0.0;   // Expected return at 2-bar horizon
         double expected_volatility = 0.0;  // Expected volatility over hold period
 
         /**
-         * Check if multiple horizons agree on direction
-         * Returns true if at least 2 out of 4 horizons agree
+         * Check if signal agrees (simplified - always true for single horizon)
          */
         bool horizons_agree() const {
-            int positive_count = 0;
-            int negative_count = 0;
-
-            if (pred_1bar.prediction > 0) positive_count++; else negative_count++;
-            if (pred_5bar.prediction > 0) positive_count++; else negative_count++;
-            if (pred_10bar.prediction > 0) positive_count++; else negative_count++;
-            if (pred_20bar.prediction > 0) positive_count++; else negative_count++;
-
-            // At least 2 out of 4 must agree
-            return positive_count >= 2 || negative_count >= 2;
+            return true;  // Only one horizon, always agrees with itself
         }
 
         /**
          * Check if signal is strong enough to enter
-         * RELAXED CRITERIA: Only requires strong 5-bar signal and directional agreement
+         * Simplified for 2-bar only horizon
          */
         bool should_enter(double min_prediction = 0.002,
                          double min_confidence = 0.6) const {
-            // Require 5-bar prediction to exceed minimum threshold
-            if (std::abs(pred_5bar.prediction) < min_prediction) {
+            // Require 2-bar prediction to exceed minimum threshold
+            if (std::abs(pred_2bar.prediction) < min_prediction) {
                 return false;
             }
 
-            // Require good confidence at 5-bar horizon
-            if (pred_5bar.confidence < min_confidence) {
+            // Require good confidence at 2-bar horizon
+            if (pred_2bar.confidence < min_confidence) {
                 return false;
             }
-
-            // Only require directional agreement between 1-bar and 5-bar
-            // (removed requirement for all 3 horizons to agree)
-            if ((pred_1bar.prediction > 0) != (pred_5bar.prediction > 0)) {
-                return false;
-            }
-
-            // Removed 3x ratio requirement - was too restrictive
 
             return true;
         }
 
         /**
-         * Suggest optimal holding period based on predictions
+         * Suggest optimal holding period (fixed at 2 bars)
          */
         int suggested_hold_period() const {
-            // Use optimal_horizon as base, but add buffer
-            if (optimal_horizon == 10) {
-                return 10;
-            } else if (optimal_horizon == 5) {
-                return 5;
-            } else {
-                return 3;  // Minimum meaningful hold
-            }
+            return 2;  // Fixed 2-bar hold
         }
     };
 
     /**
-     * Configuration for multi-horizon predictor
+     * Configuration for multi-horizon predictor (simplified for 2-bar)
      */
     struct Config {
-        // EWRLS parameters per horizon
-        double lambda_1bar;      // Fast adaptation for 1-bar
-        double lambda_5bar;     // Medium adaptation for 5-bar
-        double lambda_10bar;    // Slow adaptation for 10-bar
-        double lambda_20bar;    // Slowest adaptation for 20-bar
+        // EWRLS parameters for 2-bar horizon
+        double lambda_2bar;      // Adaptation rate for 2-bar
 
         // Uncertainty estimation (for confidence calculations)
         double initial_uncertainty;  // 1% initial uncertainty
@@ -137,10 +106,7 @@ public:
         double min_signal_to_noise;
 
         Config()
-            : lambda_1bar(0.99)
-            , lambda_5bar(0.995)
-            , lambda_10bar(0.998)
-            , lambda_20bar(0.999)
+            : lambda_2bar(0.98)
             , initial_uncertainty(0.01)
             , uncertainty_decay(0.95)
             , min_confidence(0.6)
@@ -163,20 +129,12 @@ public:
     MultiHorizonPrediction predict(const Eigen::VectorXd& features);
 
     /**
-     * Update predictors with realized returns
+     * Update predictor with realized 2-bar return
      * @param features Feature vector used for prediction
-     * @param return_1bar Actual 1-bar return
-     * @param return_5bar Actual 5-bar cumulative return (if available)
-     * @param return_10bar Actual 10-bar cumulative return (if available)
-     * @param return_20bar Actual 20-bar cumulative return (if available)
-     *
-     * Note: For 5-bar, 10-bar, and 20-bar updates, pass NaN if not yet available
+     * @param return_2bar Actual 2-bar cumulative return
      */
     void update(const Eigen::VectorXd& features,
-                double return_1bar,
-                double return_5bar = std::numeric_limits<double>::quiet_NaN(),
-                double return_10bar = std::numeric_limits<double>::quiet_NaN(),
-                double return_20bar = std::numeric_limits<double>::quiet_NaN());
+                double return_2bar);
 
     /**
      * Reset all predictors
@@ -194,23 +152,20 @@ public:
     const std::string& symbol() const { return symbol_; }
 
     /**
-     * Get update counts for each horizon
+     * Get update count for 2-bar horizon
      */
-    std::array<size_t, 4> update_counts() const;
+    size_t update_count() const;
 
 private:
     std::string symbol_;
     Config config_;
 
-    // Separate predictors for each horizon
-    std::unique_ptr<OnlinePredictor> predictor_1bar_;
-    std::unique_ptr<OnlinePredictor> predictor_5bar_;
-    std::unique_ptr<OnlinePredictor> predictor_10bar_;
-    std::unique_ptr<OnlinePredictor> predictor_20bar_;
+    // Single predictor for 2-bar horizon
+    std::unique_ptr<OnlinePredictor> predictor_2bar_;
 
     // Uncertainty tracking (simple exponentially weighted variance)
-    std::array<double, 4> prediction_errors_;  // Running prediction errors
-    std::array<double, 4> uncertainties_;      // Estimated uncertainties
+    double prediction_error_;  // Running prediction error
+    double uncertainty_;       // Estimated uncertainty
 
     /**
      * Calculate prediction quality metrics
@@ -220,12 +175,7 @@ private:
     /**
      * Update uncertainty estimate based on prediction error
      */
-    void update_uncertainty(int horizon_idx, double error);
-
-    /**
-     * Determine optimal horizon based on Sharpe-like metric
-     */
-    int determine_optimal_horizon(const MultiHorizonPrediction& pred) const;
+    void update_uncertainty(double error);
 };
 
 } // namespace trading

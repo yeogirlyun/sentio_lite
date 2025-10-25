@@ -110,8 +110,7 @@ public:
      */
     bool should_exit_position(const Symbol& symbol,
                              int current_bar,
-                             const MultiHorizonPredictor::MultiHorizonPrediction& prediction,
-                             double current_price);
+                             const MultiHorizonPredictor::MultiHorizonPrediction& prediction);
 
     /**
      * Record position entry

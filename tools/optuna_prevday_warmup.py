@@ -64,7 +64,7 @@ class PrevDayWarmupOptimizer:
             self.sentio_bin,
             "mock",
             "--date", test_date,
-            "--sim-days", "0",
+            
             "--warmup-bars", str(self.warmup_bars),
             "--no-dashboard",
             "--results-file", results_file

@@ -42,8 +42,7 @@ bool TradeFilter::can_enter_position(
 bool TradeFilter::should_exit_position(
     const Symbol& symbol,
     int current_bar,
-    const MultiHorizonPredictor::MultiHorizonPrediction& prediction,
-    double current_price) {
+    const MultiHorizonPredictor::MultiHorizonPrediction& prediction) {
 
     auto it = position_states_.find(symbol);
     if (it == position_states_.end() || !it->second.has_position) {
@@ -60,23 +59,22 @@ bool TradeFilter::should_exit_position(
     }
 
     // 1. Signal quality degraded significantly
-    // Use the 5-bar prediction as primary signal
-    if (prediction.pred_5bar.confidence < config_.exit_confidence_threshold) {
+    // Use the 2-bar prediction as primary signal
+    if (prediction.pred_2bar.confidence < config_.exit_confidence_threshold) {
         return true;
     }
 
     // 2. Signal reversed direction
     if (state.entry_prediction > 0 &&
-        prediction.pred_5bar.prediction < config_.exit_signal_reversed_threshold) {
+        prediction.pred_2bar.prediction < config_.exit_signal_reversed_threshold) {
         return true;  // Was bullish, now bearish
     }
     if (state.entry_prediction < 0 &&
-        prediction.pred_5bar.prediction > -config_.exit_signal_reversed_threshold) {
+        prediction.pred_2bar.prediction > -config_.exit_signal_reversed_threshold) {
         return true;  // Was bearish, now bullish
     }
 
-    // NOTE: Removed ALL P&L-based exits (stop loss, profit target, emergency stop)
-    // Exits are now 100% signal-driven:
+    // Exits are 100% signal-driven:
     //   - EOD liquidation (handled in MultiSymbolTrader)
     //   - Rotation to better signal (handled in MultiSymbolTrader)
     //   - Signal quality degradation (above)
@@ -98,8 +96,8 @@ void TradeFilter::record_entry(const Symbol& symbol, int entry_bar,
     trade_bars_.push_back(entry_bar);
 
     // Keep only recent trades (last 500 bars ~ 1 day of minute data)
-    while (trade_bars_.size() > 500) {
-        trade_bars_.pop_front();
+    if (trade_bars_.size() > 500) {
+        trade_bars_.erase(trade_bars_.begin(), trade_bars_.end() - 500);
     }
 }
 
@@ -112,8 +110,8 @@ void TradeFilter::record_exit(const Symbol& symbol, int exit_bar) {
     trade_bars_.push_back(exit_bar);
 
     // Keep only recent trades
-    while (trade_bars_.size() > 500) {
-        trade_bars_.pop_front();
+    if (trade_bars_.size() > 500) {
+        trade_bars_.erase(trade_bars_.begin(), trade_bars_.end() - 500);
     }
 }
 

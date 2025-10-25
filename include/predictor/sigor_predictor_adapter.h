@@ -66,23 +66,17 @@ public:
         double confidence = last_signal_.confidence;
         double uncertainty = 0.01 * (1.0 - confidence);  // Lower confidence = higher uncertainty
 
-        // Populate all horizons with same signal (SIGOR doesn't predict multi-horizon)
+        // Populate 2-bar horizon with SIGOR signal
         // The rotation system will use the prediction values directly
-        result.pred_1bar.prediction = prediction_pct;
-        result.pred_1bar.confidence = confidence;
-        result.pred_1bar.uncertainty = uncertainty;
-        result.pred_1bar.z_score = (uncertainty > 0) ? (prediction_pct / uncertainty) : 0.0;
-        result.pred_1bar.signal_to_noise = (uncertainty > 0) ? (std::abs(prediction_pct) / uncertainty) : 0.0;
+        result.pred_2bar.prediction = prediction_pct;
+        result.pred_2bar.confidence = confidence;
+        result.pred_2bar.uncertainty = uncertainty;
+        result.pred_2bar.z_score = (uncertainty > 0) ? (prediction_pct / uncertainty) : 0.0;
+        result.pred_2bar.signal_to_noise = (uncertainty > 0) ? (std::abs(prediction_pct) / uncertainty) : 0.0;
 
-        // For simplicity, use same prediction for all horizons without scaling
-        // (Avoid saturation in probability scaling for rotation)
-        result.pred_5bar = result.pred_1bar;
-        result.pred_10bar = result.pred_1bar;
-        result.pred_20bar = result.pred_1bar;
-
-        // Optimal horizon is always 1-bar for SIGOR (it's a tactical system)
-        result.optimal_horizon = 1;
-        result.expected_return = result.pred_1bar.prediction;
+        // Optimal horizon is 2 bars (matching EWRLS)
+        result.optimal_horizon = 2;
+        result.expected_return = result.pred_2bar.prediction;
         result.expected_volatility = uncertainty;
 
         return result;

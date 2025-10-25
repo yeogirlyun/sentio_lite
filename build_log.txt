@@ -1,0 +1,16 @@
+[ 66%] Built target sentio_core
+[ 77%] Built target alpaca_cost_demo
+[ 88%] Built target test_sigor
+[ 94%] Building CXX object CMakeFiles/sentio_lite.dir/src/main.cpp.o
+In file included from /Volumes/MyBookDuo/Projects/sentio_lite/src/main.cpp:1:
+In file included from /Volumes/MyBookDuo/Projects/sentio_lite/include/trading/multi_symbol_trader.h:8:
+/Volumes/MyBookDuo/Projects/sentio_lite/include/trading/alpaca_cost_model.h:293:23: warning: unused parameter 'max_minutes' [-Wunused-parameter]
+  293 |     bool is_stale(int max_minutes = 60) const {
+      |                       ^
+/Volumes/MyBookDuo/Projects/sentio_lite/src/main.cpp:9:10: fatal error: 'nlohmann/json.hpp' file not found
+    9 | #include <nlohmann/json.hpp>
+      |          ^~~~~~~~~~~~~~~~~~~
+1 warning and 1 error generated.
+make[2]: *** [CMakeFiles/sentio_lite.dir/src/main.cpp.o] Error 1
+make[1]: *** [CMakeFiles/sentio_lite.dir/all] Error 2
+make: *** [all] Error 2

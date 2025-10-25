@@ -58,16 +58,37 @@ class FiveDayOptimizer:
         Returns:
             Dictionary with MRD, win_rate, total_trades, etc.
         """
+        # Save params to config file temporarily
+        config_path = "config/trading_params.json"
+
+        # Read current config
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+
+        # Update with trial parameters
+        config['parameters']['lambda_2bar'] = params['lambda_2bar']
+        config['parameters']['min_prediction_for_entry'] = params['min_prediction_for_entry']
+        config['parameters']['increase_on_trade'] = params['increase_on_trade']
+        config['parameters']['decrease_on_no_trade'] = params['decrease_on_no_trade']
+        config['parameters']['min_bars_to_hold'] = params['min_bars_to_hold']
+        config['parameters']['lookback_window'] = params['lookback_window']
+        config['parameters']['win_multiplier'] = params['win_multiplier']
+        config['parameters']['loss_multiplier'] = params['loss_multiplier']
+        config['parameters']['rotation_strength_delta'] = params['rotation_strength_delta']
+        config['parameters']['min_rank_strength'] = params['min_rank_strength']
+        config['parameters']['max_positions'] = params['max_positions']
+
+        # Write updated config
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+
         cmd = [
             self.sentio_bin,
             "mock",
             "--date", test_date,
-            "--sim-days", str(self.sim_days),
-            "--no-dashboard",
-            "--max-positions", str(params['max_positions']),
-            "--stop-loss", str(params['stop_loss_pct']),
-            "--profit-target", str(params['profit_target_pct']),
-            "--lambda", str(params['lambda_1bar'])  # Simplified: use same lambda for all horizons
+            
+            "--warmup-bars", "100",
+            "--no-dashboard"
         ]
 
         try:
@@ -141,24 +162,19 @@ class FiveDayOptimizer:
     def objective(self, trial: optuna.Trial) -> float:
         """Optuna objective function - returns average MRD across 5 days"""
 
-        # Define search space (16 parameters)
+        # Define search space for 2-bar EWRLS
         params = {
-            'max_positions': trial.suggest_int('max_positions', 2, 5),
-            'stop_loss_pct': trial.suggest_float('stop_loss_pct', -0.03, -0.01, step=0.002),
-            'profit_target_pct': trial.suggest_float('profit_target_pct', 0.02, 0.08, step=0.005),
-            'lambda_1bar': trial.suggest_float('lambda_1bar', 0.95, 0.995, step=0.005),
-            'lambda_5bar': trial.suggest_float('lambda_5bar', 0.98, 0.999, step=0.001),
-            'lambda_10bar': trial.suggest_float('lambda_10bar', 0.99, 0.9999, step=0.0001),
-            'min_prediction_for_entry': trial.suggest_float('min_prediction_for_entry', 0.0, 0.01, step=0.001),
-            'min_bars_to_hold': trial.suggest_int('min_bars_to_hold', 10, 40, step=5),
-            'min_bars_to_learn': 391,  # Fixed: 1 day
-            'bars_per_day': 391,  # Fixed
-            'initial_capital': 100000.0,  # Fixed
-            'lookback_window': trial.suggest_int('lookback_window', 20, 100, step=10),
-            'win_multiplier': trial.suggest_float('win_multiplier', 1.0, 1.5, step=0.1),
+            'max_positions': trial.suggest_int('max_positions', 1, 3),
+            'lambda_2bar': trial.suggest_float('lambda_2bar', 0.95, 0.995, step=0.005),
+            'min_prediction_for_entry': trial.suggest_float('min_prediction_for_entry', 0.0001, 0.005, step=0.0001),
+            'increase_on_trade': trial.suggest_float('increase_on_trade', 0.0005, 0.002, step=0.0001),
+            'decrease_on_no_trade': trial.suggest_float('decrease_on_no_trade', 0.0001, 0.001, step=0.0001),
+            'min_bars_to_hold': trial.suggest_int('min_bars_to_hold', 2, 10, step=1),
+            'lookback_window': trial.suggest_int('lookback_window', 30, 150, step=10),
+            'win_multiplier': trial.suggest_float('win_multiplier', 1.0, 2.0, step=0.1),
             'loss_multiplier': trial.suggest_float('loss_multiplier', 0.5, 1.0, step=0.1),
-            'rotation_strength_delta': trial.suggest_float('rotation_strength_delta', 0.001, 0.02, step=0.001),
-            'min_rank_strength': trial.suggest_float('min_rank_strength', 0.0001, 0.005, step=0.0001)
+            'rotation_strength_delta': trial.suggest_float('rotation_strength_delta', 0.005, 0.03, step=0.001),
+            'min_rank_strength': trial.suggest_float('min_rank_strength', 0.001, 0.01, step=0.0005)
         }
 
         # Evaluate across 5 days
@@ -290,14 +306,12 @@ class FiveDayOptimizer:
             },
             "parameters": {
                 "max_positions": int(balanced_params['max_positions']),
-                "stop_loss_pct": float(balanced_params['stop_loss_pct']),
-                "profit_target_pct": float(balanced_params['profit_target_pct']),
-                "lambda_1bar": float(balanced_params['lambda_1bar']),
-                "lambda_5bar": float(balanced_params['lambda_5bar']),
-                "lambda_10bar": float(balanced_params['lambda_10bar']),
+                "lambda_2bar": float(balanced_params['lambda_2bar']),
                 "min_prediction_for_entry": float(balanced_params['min_prediction_for_entry']),
+                "increase_on_trade": float(balanced_params['increase_on_trade']),
+                "decrease_on_no_trade": float(balanced_params['decrease_on_no_trade']),
                 "min_bars_to_hold": int(balanced_params['min_bars_to_hold']),
-                "min_bars_to_learn": 391,
+                "min_bars_to_learn": 0,
                 "bars_per_day": 391,
                 "initial_capital": 100000.0,
                 "lookback_window": int(balanced_params['lookback_window']),
@@ -405,7 +419,7 @@ if __name__ == "__main__":
         help="End date (most recent test day) in YYYY-MM-DD format"
     )
     parser.add_argument(
-        "--sim-days",
+        
         type=int,
         default=5,
         help="Number of simulation days per test (default: 5)"

@@ -95,17 +95,18 @@ echo ""
 mkdir -p logs/live
 
 # Fetch today's historical bars for SIGOR warmup (optional but recommended)
-echo -e "${BLUE}Fetching today's historical bars for SIGOR warmup...${NC}"
-echo "   (This gives SIGOR lookback data for indicators)"
-echo ""
-
-python3 scripts/fetch_today_bars.py 2>/dev/null || {
-    echo -e "${YELLOW}   ⚠️  Failed to fetch warmup bars${NC}"
-    echo "   → SIGOR will start trading after ~30 minutes of live bars"
-    echo ""
-}
-
-echo ""
+# TEMPORARILY DISABLED - warmup with partial snapshots causes blocking
+# echo -e "${BLUE}Fetching today's historical bars for SIGOR warmup...${NC}"
+# echo "   (This gives SIGOR lookback data for indicators)"
+# echo ""
+#
+# python3 scripts/fetch_today_bars.py 2>/dev/null || {
+#     echo -e "${YELLOW}   ⚠️  Failed to fetch warmup bars${NC}"
+#     echo "   → SIGOR will start trading after ~30 minutes of live bars"
+#     echo ""
+# }
+#
+# echo ""
 
 # PIDs for cleanup
 BRIDGE_PID=""
@@ -162,17 +163,13 @@ fi
 echo "      Log: logs/live/websocket_bridge.log"
 sleep 3  # Give it time to create FIFO and connect
 
-# 2. Start Alpaca Order Client (optional - for actual order submission)
-# Uncomment to enable order submission:
-# echo -e "${YELLOW}[2/3]${NC} Starting Alpaca order client..."
-# python3 scripts/alpaca_order_client.py > logs/live/order_client.log 2>&1 &
-# ORDER_CLIENT_PID=$!
-# echo -e "${GREEN}✓${NC} Order client started (PID: $ORDER_CLIENT_PID)"
-# echo "      Log: logs/live/order_client.log"
-# sleep 1
-
-echo -e "${YELLOW}[2/3]${NC} Order client: ${YELLOW}DISABLED${NC} (observation mode only)"
-echo "      Enable in script to submit real orders"
+# 2. Start Alpaca Order Client (for actual order submission)
+echo -e "${YELLOW}[2/3]${NC} Starting Alpaca order client..."
+python3 scripts/alpaca_order_client.py > logs/live/order_client.log 2>&1 &
+ORDER_CLIENT_PID=$!
+echo -e "${GREEN}✓${NC} Order client started (PID: $ORDER_CLIENT_PID)"
+echo "      Log: logs/live/order_client.log"
+sleep 1
 
 # 3. Start C++ SIGOR Trader
 echo -e "${YELLOW}[3/3]${NC} Starting SIGOR trading engine..."

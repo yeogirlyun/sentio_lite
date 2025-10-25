@@ -64,10 +64,7 @@ public:
         file << "  \"config\": {\n";
         file << "    \"strategy_name\": \"" << get_strategy_display_name(trader.config().strategy) << "\",\n";
         file << "    \"max_positions\": " << trader.config().max_positions << ",\n";
-        file << "    \"lambda_1bar\": " << trader.config().horizon_config.lambda_1bar << ",\n";
-        file << "    \"lambda_5bar\": " << trader.config().horizon_config.lambda_5bar << ",\n";
-        file << "    \"lambda_10bar\": " << trader.config().horizon_config.lambda_10bar << ",\n";
-        file << "    \"lambda_20bar\": " << trader.config().horizon_config.lambda_20bar << ",\n";
+        file << "    \"lambda_2bar\": " << trader.config().horizon_config.lambda_2bar << ",\n";
         file << "    \"min_prediction_for_entry\": " << trader.config().min_prediction_for_entry << ",\n";
         file << "    \"min_prediction_increase_on_trade\": " << trader.config().min_prediction_increase_on_trade << ",\n";
         file << "    \"min_prediction_decrease_on_no_trade\": " << trader.config().min_prediction_decrease_on_no_trade << ",\n";
