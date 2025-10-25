@@ -1,6 +1,4 @@
 #pragma once
-#include "predictor/online_predictor.h"
-#include "predictor/feature_extractor.h"
 #include <memory>
 #include <array>
 #include <string>
@@ -89,93 +87,7 @@ public:
         }
     };
 
-    /**
-     * Configuration for multi-horizon predictor (simplified for 2-bar)
-     */
-    struct Config {
-        // EWRLS parameters for 2-bar horizon
-        double lambda_2bar;      // Adaptation rate for 2-bar
-
-        // Uncertainty estimation (for confidence calculations)
-        double initial_uncertainty;  // 1% initial uncertainty
-        double uncertainty_decay;    // Decay factor for uncertainty
-
-        // Quality thresholds
-        double min_confidence;
-        double min_z_score;
-        double min_signal_to_noise;
-
-        Config()
-            : lambda_2bar(0.98)
-            , initial_uncertainty(0.01)
-            , uncertainty_decay(0.95)
-            , min_confidence(0.6)
-            , min_z_score(1.2)
-            , min_signal_to_noise(2.0) {}
-    };
-
-    /**
-     * Constructor
-     * @param symbol Symbol identifier (for debugging)
-     * @param config Configuration parameters
-     */
-    explicit MultiHorizonPredictor(const std::string& symbol, const Config& config = Config());
-
-    /**
-     * Make predictions at all horizons
-     * @param features Input feature vector (33 dimensions)
-     * @return Multi-horizon prediction with quality metrics
-     */
-    MultiHorizonPrediction predict(const Eigen::VectorXd& features);
-
-    /**
-     * Update predictor with realized 2-bar return
-     * @param features Feature vector used for prediction
-     * @param return_2bar Actual 2-bar cumulative return
-     */
-    void update(const Eigen::VectorXd& features,
-                double return_2bar);
-
-    /**
-     * Reset all predictors
-     */
-    void reset();
-
-    /**
-     * Get configuration
-     */
-    const Config& config() const { return config_; }
-
-    /**
-     * Get symbol identifier
-     */
-    const std::string& symbol() const { return symbol_; }
-
-    /**
-     * Get update count for 2-bar horizon
-     */
-    size_t update_count() const;
-
-private:
-    std::string symbol_;
-    Config config_;
-
-    // Single predictor for 2-bar horizon
-    std::unique_ptr<OnlinePredictor> predictor_2bar_;
-
-    // Uncertainty tracking (simple exponentially weighted variance)
-    double prediction_error_;  // Running prediction error
-    double uncertainty_;       // Estimated uncertainty
-
-    /**
-     * Calculate prediction quality metrics
-     */
-    PredictionQuality calculate_quality(double prediction, double uncertainty) const;
-
-    /**
-     * Update uncertainty estimate based on prediction error
-     */
-    void update_uncertainty(double error);
+    // Removed legacy EWRLS implementation; kept only data structures for adapters
 };
 
 } // namespace trading
