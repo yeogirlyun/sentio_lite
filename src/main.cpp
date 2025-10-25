@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <set>
+#include <deque>
 
 using namespace trading;
 
@@ -1027,6 +1028,66 @@ int run_live_mode(Config& config) {
         size_t snapshots_processed = 0;
         bool running = true;
 
+        // Keep last N raw JSON lines to include in failure reports
+        std::deque<std::string> recent_raw_lines;
+        const size_t MAX_RECENT_LINES = 50;
+
+        auto write_runtime_failure_report = [&](const std::string& severity,
+                                                const std::string& message,
+                                                const std::string& offending_line) {
+            try {
+                std::filesystem::create_directories("logs/live");
+                auto now = std::chrono::system_clock::now();
+                std::time_t tnow = std::chrono::system_clock::to_time_t(now);
+                char tsbuf[20];
+                std::strftime(tsbuf, sizeof(tsbuf), "%Y%m%d_%H%M%S", std::localtime(&tnow));
+                std::string path = std::string("logs/live/failure_") + severity + "_" + tsbuf + ".log";
+
+                std::ofstream out(path);
+                out << "severity: " << severity << "\n";
+                out << "message: " << message << "\n";
+                out << "bars_processed: " << bars_processed << "\n";
+                out << "snapshots_processed: " << snapshots_processed << "\n";
+                out << "symbols_expected: ";
+                for (size_t i = 0; i < config.symbols.size(); ++i) {
+                    out << config.symbols[i] << (i + 1 < config.symbols.size() ? "," : "");
+                }
+                out << "\n";
+                out << "symbols_present: ";
+                {
+                    bool first = true;
+                    for (const auto& [sym, _] : market_snapshot) {
+                        if (!first) out << ","; first = false;
+                        out << sym;
+                    }
+                    out << "\n";
+                }
+                if (!offending_line.empty()) {
+                    out << "offending_line: " << offending_line << "\n";
+                }
+                out << "recent_raw_lines:" << "\n";
+                size_t idx = 0;
+                for (const auto& ln : recent_raw_lines) {
+                    out << "  [" << idx++ << "] " << ln << "\n";
+                }
+                // Dump positions
+                out << "positions:" << "\n";
+                for (const auto& [sym, pos] : trader.positions()) {
+                    out << "  - symbol: " << sym
+                        << ", shares: " << pos.shares
+                        << ", entry: " << pos.entry_price
+                        << ", held_bars: " << (int)0 /* placeholder */
+                        << "\n";
+                }
+                out.close();
+                std::cerr << "\n⚠️  Runtime incident logged → " << path << "\n";
+            } catch (...) {
+                // Swallow any logging failures to avoid masking original error
+            }
+        };
+
+        
+
         std::cout << "📡 Opening FIFO pipe for incoming bars...\n";
         std::cout << "   (Waiting for websocket bridge to connect)\n";
         std::cout << "   TIP: Start the bridge with:\n";
@@ -1049,6 +1110,10 @@ int run_live_mode(Config& config) {
         std::string line;
         while (running && std::getline(bar_stream, line)) {
             if (line.empty()) continue;
+
+            // Track raw line for failure reports
+            recent_raw_lines.push_back(line);
+            if (recent_raw_lines.size() > MAX_RECENT_LINES) recent_raw_lines.pop_front();
 
             try {
                 // Parse JSON bar from websocket bridge
@@ -1142,9 +1207,15 @@ int run_live_mode(Config& config) {
 
             } catch (const nlohmann::json::exception& e) {
                 std::cerr << "⚠️  JSON parse error: " << e.what() << "\n";
+                write_runtime_failure_report("WARN", std::string("json_exception: ") + e.what(), line);
                 continue;
             } catch (const std::exception& e) {
                 std::cerr << "⚠️  Error processing bar: " << e.what() << "\n";
+                write_runtime_failure_report("WARN", std::string("exception: ") + e.what(), line);
+                continue;
+            } catch (...) {
+                std::cerr << "⚠️  Unknown error processing bar\n";
+                write_runtime_failure_report("WARN", "unknown_exception", line);
                 continue;
             }
         }
@@ -1250,7 +1321,20 @@ int run_live_mode(Config& config) {
         return 0;
 
     } catch (const std::exception& e) {
-        std::cerr << "\n❌ Error in live mode: " << e.what() << "\n\n";
+        try {
+            std::filesystem::create_directories("logs/live");
+            auto now = std::chrono::system_clock::now();
+            std::time_t tnow = std::chrono::system_clock::to_time_t(now);
+            char tsbuf[20];
+            std::strftime(tsbuf, sizeof(tsbuf), "%Y%m%d_%H%M%S", std::localtime(&tnow));
+            std::ofstream out(std::string("logs/live/failure_FATAL_") + tsbuf + ".log");
+            out << "severity: FATAL\n";
+            out << "message: " << e.what() << "\n";
+            out.close();
+            std::cerr << "\n❌ Error in live mode: " << e.what() << " (report written)\n\n";
+        } catch (...) {
+            std::cerr << "\n❌ Error in live mode: " << e.what() << "\n\n";
+        }
     return 1;
     }
 }
