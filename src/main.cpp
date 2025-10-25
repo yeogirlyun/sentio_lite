@@ -239,13 +239,13 @@ bool parse_args(int argc, char* argv[], Config& config) {
             std::cout << "\n📊 SIGOR Strategy Configuration Loaded\n";
             trading::SigorConfigLoader::print_config(config.trading.sigor_config, sigor_params_path);
 
-            // Rule-based: disable warmup/simulation
-            config.warmup_bars_specified = 0;
-            config.intraday_warmup = true;
+            // Rule-based: disable learning/simulation warmup (but allow detector warmup bars)
             config.trading.min_bars_to_learn = 0;
             config.trading.warmup.enabled = false;
             config.trading.warmup.observation_days = 0;
             config.trading.warmup.simulation_days = 0;
+            // NOTE: warmup_bars_specified and intraday_warmup are NOT overridden
+            // They can be controlled via --warmup-bars and --intraday-warmup flags
         }
         config.capital = config.trading.initial_capital;
     } catch (const std::exception& e) {
