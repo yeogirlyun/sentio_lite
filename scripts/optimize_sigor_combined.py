@@ -17,6 +17,7 @@ import optuna
 from typing import Dict, List, Tuple
 import sys
 from datetime import datetime, timedelta
+import pandas as pd
 import numpy as np
 
 CONFIG_FILE = "config/sigor_params.json"
@@ -323,18 +324,19 @@ class SigorCombinedOptimizer:
 if __name__ == "__main__":
     import argparse
 
-    def get_trading_days(end_date: str, n_days: int) -> List[str]:
-        end = datetime.strptime(end_date, "%Y-%m-%d")
-        days: List[str] = []
-        cur = end
-        while len(days) < n_days:
-            if cur.weekday() < 5:
-                days.append(cur.strftime("%Y-%m-%d"))
-            cur -= timedelta(days=1)
-        return list(reversed(days))
+    def get_trading_days_from_csv(data_file: str, end_date: str, n_days: int) -> List[str]:
+        df = pd.read_csv(data_file)
+        ts_col = df.columns[0]
+        df['datetime'] = pd.to_datetime(df[ts_col])
+        df['date'] = df['datetime'].dt.date
+        available = sorted(df['date'].unique())
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+        filtered = [d for d in available if d <= end_dt]
+        return [d.strftime('%Y-%m-%d') for d in filtered[-n_days:]]
 
     parser = argparse.ArgumentParser(description="Optimize SIGOR weights + windows with Optuna (eval/validation constrained)")
     parser.add_argument("--end-date", required=True, help="End date MM-DD (inclusive, year fixed to 2025)")
+    parser.add_argument("--data", default="data/equities/SPY_RTH_NH.csv", help="Path to SPY_RTH_NH.csv")
     parser.add_argument("--trials", type=int, default=200, help="Number of Optuna trials (default: 200)")
     parser.add_argument("--overfitting-threshold", type=float, default=0.20,
                       help="Max allowed degradation from evaluation to validation (default: 0.20)")
@@ -349,7 +351,7 @@ if __name__ == "__main__":
         print("ERROR: --end-date must be in MM-DD format (e.g., 10-24), year is fixed to 2025")
         sys.exit(1)
 
-    all_days = get_trading_days(full_end_date, 15)
+    all_days = get_trading_days_from_csv(args.data, full_end_date, 15)
     val_dates = all_days[:10]
     eval_dates = all_days[10:]
 
