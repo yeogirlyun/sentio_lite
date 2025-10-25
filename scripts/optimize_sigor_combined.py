@@ -102,9 +102,7 @@ class SigorCombinedOptimizer:
         with open(CONFIG_FILE, 'w') as f:
             json.dump(config, f, indent=2)
 
-        # Rebuild (silent)
-        subprocess.run(["cmake", "--build", "build"],
-                      capture_output=True, timeout=60)
+        # Removed per-trial rebuild for performance; binary is static across trials
 
         # Test on all dates
         total_mrd = 0.0
