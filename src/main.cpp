@@ -62,6 +62,10 @@ struct Config {
     // Configuration directory (can be overridden via command line)
     std::string config_dir = "config";
 
+    // Live feed selection
+    std::string feed = "fifo";           // fifo | zmq
+    std::string zmq_url = "tcp://127.0.0.1:5555";
+
     // Trading parameters
     TradingConfig trading;
 };
@@ -83,6 +87,9 @@ void print_usage(const char* program_name) {
               << "Mock Mode Options:\n"
               << "  --data-dir DIR       Data directory (default: data)\n"
               << "  --extension EXT      File extension: .bin or .csv (default: .bin)\n\n"
+              << "Live Feed Options:\n"
+              << "  --feed {fifo,zmq}    Live input: named pipe (default) or ZeroMQ SUB\n"
+              << "  --zmq-url URL        ZMQ endpoint (default: tcp://127.0.0.1:5555)\n\n"
               << "Configuration:\n"
               << "  --config DIR         Config directory containing trading_params.json and sigor_params.json\n"
               << "                       (default: config)\n"
@@ -182,6 +189,13 @@ bool parse_args(int argc, char* argv[], Config& config) {
         // Configuration directory
         else if (arg == "--config" && i + 1 < argc) {
             config.config_dir = argv[++i];
+        }
+        // Live feed
+        else if (arg == "--feed" && i + 1 < argc) {
+            config.feed = argv[++i];
+        }
+        else if (arg == "--zmq-url" && i + 1 < argc) {
+            config.zmq_url = argv[++i];
         }
         // Output options
         else if (arg == "--no-dashboard") {
@@ -1095,27 +1109,73 @@ int run_live_mode(Config& config) {
 
         
 
-        std::cout << "📡 Opening FIFO pipe for incoming bars...\n";
-        std::cout << "   (Waiting for websocket bridge to connect)\n";
-        std::cout << "   TIP: Start the bridge with:\n";
-        std::cout << "        python3 scripts/alpaca_websocket_bridge_rotation.py\n\n";
+        std::unique_ptr<std::istream> fifo_stream;
+        std::ifstream bar_stream;
+        bool use_fifo = (config.feed != "zmq");
 
-        // Open FIFO for reading bars (blocks until bridge connects)
-        std::ifstream bar_stream(bar_fifo);
-        if (!bar_stream.is_open()) {
-            std::cerr << "❌ Error: Failed to open bar FIFO: " << bar_fifo << "\n";
-            std::cerr << "   Make sure the websocket bridge is running!\n";
-            return 1;
+#ifdef ENABLE_ZMQ
+        if (!use_fifo) {
+            std::cout << "🔗 ZMQ SUB mode: " << config.zmq_url << " (topic: BARS)\n\n";
+        }
+#else
+        if (!use_fifo) {
+            std::cerr << "⚠️  ZMQ feed requested but binary built without ZMQ. Falling back to FIFO.\n";
+            use_fifo = true;
+        }
+#endif
+
+        if (use_fifo) {
+            std::cout << "📡 Opening FIFO pipe for incoming bars...\n";
+            std::cout << "   (Waiting for bridge to connect)\n\n";
+            bar_stream.open(bar_fifo);
+            if (!bar_stream.is_open()) {
+                std::cerr << "❌ Error: Failed to open bar FIFO: " << bar_fifo << "\n";
+                return 1;
+            }
+            std::cout << "✅ Connected to FIFO bridge\n";
         }
 
-        std::cout << "✅ Connected to websocket bridge\n";
         std::cout << "🚀 LIVE TRADING ACTIVE - Processing real-time bars\n";
         std::cout << "   Press Ctrl+C to stop\n\n";
         std::cout << "═══════════════════════════════════════════════════════════════\n\n";
 
         // Main trading loop - read bars from FIFO and process
         std::string line;
-        while (running && std::getline(bar_stream, line)) {
+        while (running) {
+            if (use_fifo) {
+                if (!std::getline(bar_stream, line)) break;
+            }
+#ifdef ENABLE_ZMQ
+            else {
+                // Minimal blocking ZMQ SUB receive (topic-prefixed string)
+                static zmq::context_t ctx(1);
+                static zmq::socket_t sub(ctx, zmq::socket_type::sub);
+                static bool zmq_init = false;
+                if (!zmq_init) {
+                    try {
+                        sub.set(zmq::sockopt::subscribe, "BARS");
+                        sub.set(zmq::sockopt::rcvhwm, 1000);
+                        sub.connect(config.zmq_url);
+                        zmq_init = true;
+                    } catch (const zmq::error_t& e) {
+                        std::cerr << "❌ ZMQ connect failed: " << e.what() << "\n";
+                        return 1;
+                    }
+                }
+                zmq::message_t msg;
+                try {
+                    auto res = sub.recv(msg, zmq::recv_flags::none);
+                    if (!res.has_value()) continue;
+                    std::string s = msg.to_string();
+                    auto pos = s.find(' ');
+                    if (pos == std::string::npos) continue;
+                    line = s.substr(pos + 1);
+                } catch (const zmq::error_t& e) {
+                    std::cerr << "⚠️  ZMQ error: " << e.what() << "\n";
+                    continue;
+                }
+            }
+#endif
             if (line.empty()) continue;
 
             // Track raw line for failure reports

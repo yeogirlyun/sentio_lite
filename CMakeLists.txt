@@ -37,6 +37,20 @@ endif()
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 find_package(Threads REQUIRED)
 
+# Optional: ZeroMQ for live ZMQ feed
+option(ENABLE_ZMQ "Enable ZeroMQ-based live feed" OFF)
+if(ENABLE_ZMQ)
+    find_package(ZeroMQ QUIET)
+    if(ZeroMQ_FOUND)
+        message(STATUS "ZeroMQ found: enabling ZMQ live feed")
+        set(HAVE_ZMQ TRUE)
+    else()
+        message(WARNING "ZeroMQ not found: disabling ZMQ live feed")
+        set(HAVE_ZMQ FALSE)
+        set(ENABLE_ZMQ OFF)
+    endif()
+endif()
+
 # ============================================================================
 # Include Directories
 # ============================================================================
@@ -94,6 +108,11 @@ target_link_libraries(sentio_lite PRIVATE
     Eigen3::Eigen
     Threads::Threads
 )
+
+if(ENABLE_ZMQ AND HAVE_ZMQ)
+    target_link_libraries(sentio_lite PRIVATE ZeroMQ::ZeroMQ)
+    target_compile_definitions(sentio_lite PRIVATE ENABLE_ZMQ)
+endif()
 
 # Sigor strategy test
 add_executable(test_sigor src/test_sigor.cpp)
