@@ -74,7 +74,7 @@ MultiSymbolTrader::MultiSymbolTrader(const std::vector<Symbol>& symbols,
       daily_losing_trades_(0) {
 
     // Calculate when test day begins (after warmup observation + simulation)
-    if (config_.strategy == StrategyType::SIGOR || config_.strategy == StrategyType::AWR) {
+    if (config_.strategy == StrategyType::SIGOR) {
         // Rule-based strategies; treat everything as live trading immediately
         config_.warmup.enabled = false;
         config_.warmup.observation_days = 0;
@@ -88,16 +88,11 @@ MultiSymbolTrader::MultiSymbolTrader(const std::vector<Symbol>& symbols,
     // Initialize trade filter
     trade_filter_ = std::make_unique<TradeFilter>(config_.filter_config);
 
-    // Initialize per-symbol components per strategy
+    // Initialize per-symbol components (SIGOR only)
     for (const auto& symbol : symbols_) {
-        if (config_.strategy == StrategyType::SIGOR) {
-            // SIGOR predictor adapter (uses bar data directly)
-            sigor_predictors_[symbol] = std::make_unique<SigorPredictorAdapter>(
-                symbol, config_.sigor_config);
-        } else if (config_.strategy == StrategyType::AWR) {
-            awr_predictors_[symbol] = std::make_unique<AwrPredictorAdapter>(
-                symbol, config_.awr_config);
-        }
+        // SIGOR predictor adapter (uses bar data directly)
+        sigor_predictors_[symbol] = std::make_unique<SigorPredictorAdapter>(
+            symbol, config_.sigor_config);
 
         // Trade history for adaptive sizing (both strategies)
         trade_history_[symbol] = std::make_unique<TradeHistory>(config_.trade_history_size);
@@ -212,15 +207,6 @@ void MultiSymbolTrader::on_bar(const std::unordered_map<Symbol, Bar>& market_dat
                 auto pred = sigor_predictors_[symbol]->predict(dummy_features);
                 predictions[symbol] = {pred, dummy_features, bar.close};
             }
-        } else if (config_.strategy == StrategyType::AWR) {
-            // AWR: Update with bar and generate signal
-            awr_predictors_[symbol]->update_with_bar(bar);
-
-            if (awr_predictors_[symbol]->is_warmed_up()) {
-                Eigen::VectorXd dummy_features = Eigen::VectorXd::Zero(1);
-                auto pred = awr_predictors_[symbol]->predict(dummy_features);
-                predictions[symbol] = {pred, dummy_features, bar.close};
-            }
         }
 
         // No learning/update path in SIGOR
@@ -238,7 +224,7 @@ void MultiSymbolTrader::on_bar(const std::unordered_map<Symbol, Bar>& market_dat
     // Step 6b: Update rotation cooldowns (from online_trader)
     update_rotation_cooldowns();
 
-    if (config_.strategy == StrategyType::SIGOR || config_.strategy == StrategyType::AWR) {
+    if (config_.strategy == StrategyType::SIGOR) {
         // Always trade immediately for SIGOR
         handle_live_phase(predictions, market_data);
     } else {

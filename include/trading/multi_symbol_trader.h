@@ -247,9 +247,8 @@ private:
         bool is_long = true;             // Direction of position
     };
 
-    // Per-symbol components (by strategy)
+    // Per-symbol components (SIGOR only)
     std::unordered_map<Symbol, std::unique_ptr<SigorPredictorAdapter>> sigor_predictors_;
-    std::unordered_map<Symbol, std::unique_ptr<AwrPredictorAdapter>> awr_predictors_;
 
     // Shared components (both strategies)
     std::unordered_map<Symbol, PositionWithCosts> positions_;

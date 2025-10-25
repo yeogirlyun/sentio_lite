@@ -28,7 +28,7 @@ using namespace trading;
 
 // Configuration from command line
 struct Config {
-    std::string data_dir = "data";
+    std::string data_dir = "data/equities";
     std::string extension = ".bin";  // .bin or .csv
     std::vector<std::string> symbols;
     double capital = 100000.0;
@@ -239,18 +239,6 @@ bool parse_args(int argc, char* argv[], Config& config) {
             std::cout << "\n📊 SIGOR Strategy Configuration Loaded\n";
             trading::SigorConfigLoader::print_config(config.trading.sigor_config, sigor_params_path);
 
-            // Rule-based: disable warmup/simulation
-            config.warmup_bars_specified = 0;
-            config.intraday_warmup = true;
-            config.trading.min_bars_to_learn = 0;
-            config.trading.warmup.enabled = false;
-            config.trading.warmup.observation_days = 0;
-            config.trading.warmup.simulation_days = 0;
-        } else if (config.strategy == StrategyType::AWR) {
-            std::string awr_params_path = config.config_dir + "/awr_params.json";
-            config.trading.awr_config = trading::AwrConfigLoader::load(awr_params_path);
-            config.trading.strategy = StrategyType::AWR;
-            std::cout << "\n📊 AWR Strategy Configuration Loaded\n";
             // Rule-based: disable warmup/simulation
             config.warmup_bars_specified = 0;
             config.intraday_warmup = true;

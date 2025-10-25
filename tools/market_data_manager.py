@@ -50,7 +50,7 @@ class MarketDataDB:
     Manages append-only market data storage with perfect bar alignment.
     """
 
-    def __init__(self, data_dir: str = "data"):
+    def __init__(self, data_dir: str = "data/equities"):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.nyse_calendar = mcal.get_calendar('NYSE')
@@ -469,7 +469,7 @@ def main():
     parser.add_argument('--symbols', nargs='+', help="Symbols to update (e.g., TQQQ SQQQ)")
     parser.add_argument('--start', help="Start date (MM-DD, year is fixed to 2025)")
     parser.add_argument('--end', help="End date (MM-DD, year is fixed to 2025)")
-    parser.add_argument('--outdir', default='data', help="Data directory (default: data)")
+    # Data directory is fixed to data/equities to avoid duplication and confusion
 
     # Sync commands
     parser.add_argument('--sync', action='store_true',
@@ -491,8 +491,8 @@ def main():
         if len(args.end) == 5 and args.end[2] == '-':
             args.end = "2025-" + args.end
 
-    # Initialize database
-    db = MarketDataDB(args.outdir)
+    # Initialize database (fixed root)
+    db = MarketDataDB("data/equities")
 
     # Handle query commands
     if args.list:

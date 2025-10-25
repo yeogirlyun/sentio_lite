@@ -25,12 +25,16 @@ BACKUP_FILE = "config/sigor_params.json.bak"
 RESULTS_FILE = "results/combined_optimization/optuna_results.json"
 
 class SigorCombinedOptimizer:
-    def __init__(self, eval_dates: List[str], val_dates: List[str], n_trials: int = 200, overfitting_threshold: float = 0.20):
+    def __init__(self, eval_dates: List[str], val_dates: List[str], n_trials: int = 200,
+                 overfitting_threshold: float = 0.20,
+                 warmup_mode: str = "prevday", warmup_bars: int = 60):
         self.eval_dates = eval_dates
         self.val_dates = val_dates
         self.n_trials = n_trials
         self.overfitting_threshold = overfitting_threshold
         self.sentio_bin = "./build/sentio_lite"
+        self.warmup_mode = warmup_mode  # 'prevday' or 'intraday'
+        self.warmup_bars = warmup_bars
 
         # Track all results
         self.all_results = []
@@ -41,6 +45,7 @@ class SigorCombinedOptimizer:
         print(f"  Evaluation dates (5): {', '.join(eval_dates)}")
         print(f"  Validation dates (10): {', '.join(val_dates)}")
         print(f"  Trials: {n_trials}")
+        print(f"  Warmup: mode={self.warmup_mode}, bars={self.warmup_bars}")
         print(f"  Strategy: Optimize 8 weights + 9 windows (17 parameters total, including AWR)")
         print(f"  Target: Maximize evaluation MRD with validation within {int(self.overfitting_threshold*100)}%")
         print("=" * 80)
@@ -55,7 +60,11 @@ class SigorCombinedOptimizer:
 
     def run_backtest(self, date: str) -> Dict:
         """Run backtest on a single date and return metrics"""
-        cmd = [self.sentio_bin, "mock", "--date", date, "--no-dashboard"]
+        cmd = [self.sentio_bin, "mock", "--date", date, "--no-dashboard",
+               "--warmup-bars", str(self.warmup_bars)]
+
+        if self.warmup_mode == "intraday":
+            cmd.append("--intraday-warmup")
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -340,6 +349,10 @@ if __name__ == "__main__":
     parser.add_argument("--trials", type=int, default=200, help="Number of Optuna trials (default: 200)")
     parser.add_argument("--overfitting-threshold", type=float, default=0.20,
                       help="Max allowed degradation from evaluation to validation (default: 0.20)")
+    parser.add_argument("--warmup-mode", choices=["prevday", "intraday"], default="prevday",
+                        help="Warmup source: prevday (last N bars prev day) or intraday (first N bars test day)")
+    parser.add_argument("--warmup-bars", type=int, default=60,
+                        help="Number of warmup bars (default: 60 for last hour)")
 
     args = parser.parse_args()
 
@@ -359,7 +372,9 @@ if __name__ == "__main__":
         eval_dates=eval_dates,
         val_dates=val_dates,
         n_trials=args.trials,
-        overfitting_threshold=args.overfitting_threshold
+        overfitting_threshold=args.overfitting_threshold,
+        warmup_mode=args.warmup_mode,
+        warmup_bars=args.warmup_bars
     )
 
     study = optimizer.run_optimization()
