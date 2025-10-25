@@ -18,10 +18,9 @@ class MegaDocConfig:
     """Centralized configuration for mega document creation."""
     
     # File extensions - immutable set for performance
+    # Only attach source modules to the mega document (exclude data/config like json/yaml/etc.)
     SUPPORTED_EXTENSIONS: Set[str] = field(default_factory=lambda: frozenset({
-        'h', 'cpp', 'hpp', 'c', 'py', 'js', 'ts', 
-        'java', 'rs', 'go', 'md', 'txt', 'sh', 'bat',
-        'yml', 'yaml', 'json', 'xml', 'sql'
+        'h', 'cpp', 'py', 'sh'
     }))
     
     # Display limits
