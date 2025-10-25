@@ -52,7 +52,7 @@ struct Config {
     bool intraday_warmup = false;     // True = warmup from test day itself (bars 1-N)
     size_t warmup_bars = 100;         // Actual warmup bars to use
 
-    // Strategy selection (SIGOR-only)
+    // Strategy selection
     StrategyType strategy = StrategyType::SIGOR;
     std::string strategy_str = "sigor";
 
@@ -158,7 +158,16 @@ bool parse_args(int argc, char* argv[], Config& config) {
             return false;
         }
         // Strategy selection (pre-parse only)
-        // --strategy removed (SIGOR-only)
+        if (arg == "--strategy") {
+            config.strategy_str = argv[++i];
+            try {
+                config.strategy = parse_strategy_type(config.strategy_str);
+            } catch (const std::exception& e) {
+                std::cerr << e.what() << "\n";
+                return false;
+            }
+            continue;
+        }
         // Data options
         else if (arg == "--data-dir" && i + 1 < argc) {
             config.data_dir = argv[++i];
@@ -219,30 +228,34 @@ bool parse_args(int argc, char* argv[], Config& config) {
 
     // Load configuration based on selected strategy
     try {
-        {
-            // Build paths from config_dir
-            std::string trading_params_path = config.config_dir + "/trading_params.json";
-            std::string sigor_params_path = config.config_dir + "/sigor_params.json";
-            std::string sigor_trading_path = config.config_dir + "/sigor_trading_params.json";
+        // Build common paths
+        std::string trading_params_path = config.config_dir + "/trading_params.json";
+        config.trading = trading::ConfigLoader::load(trading_params_path);
 
-            // Attempt to load full trading config from a SIGOR-specific file if it exists
-            if (std::filesystem::exists(sigor_trading_path)) {
-                config.trading = trading::ConfigLoader::load(sigor_trading_path);
-            } else {
-                config.trading = trading::ConfigLoader::load(trading_params_path);
-            }
-            // Load SIGOR model parameters
+        if (config.strategy == StrategyType::SIGOR) {
+            std::string sigor_params_path = config.config_dir + "/sigor_params.json";
             config.trading.sigor_config = trading::SigorConfigLoader::load(sigor_params_path);
             config.trading.strategy = StrategyType::SIGOR;
             std::cout << "\n📊 SIGOR Strategy Configuration Loaded\n";
             trading::SigorConfigLoader::print_config(config.trading.sigor_config, sigor_params_path);
 
-            // CRITICAL: SIGOR is rule-based and does not require warmup/simulation
-            // Disable day-based warmup to avoid consuming morning bars on the test day
-            config.warmup_bars_specified = 0;        // No prev-day warmup
-            config.intraday_warmup = true;           // Any warmup (if set later) comes from test day
-            config.trading.min_bars_to_learn = 0;    // Start trading immediately
-            config.trading.warmup.enabled = false;   // Disable warmup phases entirely
+            // Rule-based: disable warmup/simulation
+            config.warmup_bars_specified = 0;
+            config.intraday_warmup = true;
+            config.trading.min_bars_to_learn = 0;
+            config.trading.warmup.enabled = false;
+            config.trading.warmup.observation_days = 0;
+            config.trading.warmup.simulation_days = 0;
+        } else if (config.strategy == StrategyType::AWR) {
+            std::string awr_params_path = config.config_dir + "/awr_params.json";
+            config.trading.awr_config = trading::AwrConfigLoader::load(awr_params_path);
+            config.trading.strategy = StrategyType::AWR;
+            std::cout << "\n📊 AWR Strategy Configuration Loaded\n";
+            // Rule-based: disable warmup/simulation
+            config.warmup_bars_specified = 0;
+            config.intraday_warmup = true;
+            config.trading.min_bars_to_learn = 0;
+            config.trading.warmup.enabled = false;
             config.trading.warmup.observation_days = 0;
             config.trading.warmup.simulation_days = 0;
         }

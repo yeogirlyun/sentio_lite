@@ -8,6 +8,8 @@
 #include "trading/trade_filter.h"
 #include "trading/trading_strategy.h"
 #include "strategy/sigor_strategy.h"
+#include "strategy/williams_rsi_strategy.h"
+#include "predictor/awr_predictor_adapter.h"
 #include "predictor/sigor_predictor_adapter.h"
 #include <unordered_map>
 #include <memory>
@@ -31,8 +33,9 @@ struct PredictionData {
  */
 struct TradingConfig {
     // Strategy selection
-    StrategyType strategy = StrategyType::SIGOR;  // SIGOR-only
-    SigorConfig sigor_config;  // SIGOR strategy parameters (used when strategy==SIGOR)
+    StrategyType strategy = StrategyType::SIGOR;  // Default SIGOR
+    SigorConfig sigor_config;            // SIGOR strategy parameters
+    WilliamsRsiConfig awr_config;        // AWR strategy parameters
 
     double initial_capital = 100000.0;
     size_t max_positions = 3;
@@ -244,8 +247,9 @@ private:
         bool is_long = true;             // Direction of position
     };
 
-    // Per-symbol components (SIGOR strategy)
+    // Per-symbol components (by strategy)
     std::unordered_map<Symbol, std::unique_ptr<SigorPredictorAdapter>> sigor_predictors_;
+    std::unordered_map<Symbol, std::unique_ptr<AwrPredictorAdapter>> awr_predictors_;
 
     // Shared components (both strategies)
     std::unordered_map<Symbol, PositionWithCosts> positions_;

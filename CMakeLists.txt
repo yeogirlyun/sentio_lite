@@ -80,8 +80,10 @@ include_directories(${CMAKE_SOURCE_DIR}/external/nlohmann_json/include)
 # Source Files - CORRECTED AND VALIDATED
 # ============================================================================
 set(CORE_SOURCES
-    # Strategy (SIGOR only)
+    # Strategy (SIGOR + Williams %R)
     src/strategy/sigor_strategy.cpp            # Sigor rule-based ensemble (7 detectors)
+    src/strategy/williams_rsi_strategy.cpp      # Williams %R + RSI Anticipatory Crossover
+     include/predictor/awr_predictor_adapter.h
 
     # Trading engine
     src/trading/multi_symbol_trader.cpp        # Multi-symbol rotation trading
@@ -136,6 +138,14 @@ endif()
 # Sigor strategy test
 add_executable(test_sigor src/test_sigor.cpp)
 target_link_libraries(test_sigor PRIVATE
+    sentio_core
+    Eigen3::Eigen
+    Threads::Threads
+)
+
+# Williams RSI strategy test
+add_executable(test_williams_rsi src/test_williams_rsi.cpp)
+target_link_libraries(test_williams_rsi PRIVATE
     sentio_core
     Eigen3::Eigen
     Threads::Threads
