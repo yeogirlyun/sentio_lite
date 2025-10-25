@@ -107,6 +107,18 @@ struct TradingConfig {
     bool enable_stop_loss = true;          // Cut losses at stop %
     double stop_loss_pct = 0.015;          // -1.5% stop loss (online_trader value, 2:1 reward:risk)
 
+    // ===== POSITION SIZING (Kelly Criterion with Volatility Adjustment) =====
+    struct PositionSizingConfig {
+        double expected_win_pct = 0.02;       // Expected win percentage (2%)
+        double expected_loss_pct = 0.015;     // Expected loss percentage (1.5%)
+        double fractional_kelly = 0.25;       // Use 25% of full Kelly (conservative)
+        double min_position_pct = 0.05;       // Minimum position size (5% of capital)
+        double max_position_pct = 0.25;       // Maximum position size (25% of capital)
+        bool enable_volatility_adjustment = true;  // Reduce size for volatile symbols
+        int volatility_lookback = 20;         // Bars to calculate volatility
+        double max_volatility_reduce = 0.5;   // Max reduction factor (50% of base size)
+    } position_sizing;
+
     // Warmup configuration mode
     enum class WarmupMode {
         PRODUCTION,  // Strict criteria - SAFE FOR LIVE TRADING

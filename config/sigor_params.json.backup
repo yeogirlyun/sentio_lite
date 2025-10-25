@@ -1,0 +1,34 @@
+{
+  "description": "Sigor Strategy Optimized Parameters",
+  "last_updated": "2025-10-25",
+  "optimization_date": "2025-10-24",
+  "test_performance": {
+    "avg_mrd": 0.0053872,
+    "test_dates": [
+      "2024-10-16",
+      "2024-10-17",
+      "2024-10-18",
+      "2024-10-21",
+      "2024-10-22"
+    ]
+  },
+  "parameters": {
+    "k": 1.8,
+    "w_boll": 0.2934312457955781,
+    "w_rsi": 0.441674600401881,
+    "w_mom": 1.4445255162262798,
+    "w_vwap": 0.8143547618099428,
+    "w_orb": 1.3815532167099778,
+    "w_ofi": 1.7222843102064427,
+    "w_vol": 1.8945469414966518,
+    "win_boll": 23,
+    "win_rsi": 7,
+    "win_mom": 6,
+    "win_vwap": 12,
+    "orb_opening_bars": 48,
+    "vol_window": 12,
+    "w_donchian": 1.5,
+    "donchian_atr_mult": 1.0,
+    "donchian_confirm_bars": 5
+  }
+}

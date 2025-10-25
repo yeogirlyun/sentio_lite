@@ -467,8 +467,8 @@ def main():
 
     # Data update commands
     parser.add_argument('--symbols', nargs='+', help="Symbols to update (e.g., TQQQ SQQQ)")
-    parser.add_argument('--start', help="Start date (YYYY-MM-DD)")
-    parser.add_argument('--end', help="End date (YYYY-MM-DD)")
+    parser.add_argument('--start', help="Start date (MM-DD, year is fixed to 2025)")
+    parser.add_argument('--end', help="End date (MM-DD, year is fixed to 2025)")
     parser.add_argument('--outdir', default='data', help="Data directory (default: data)")
 
     # Sync commands
@@ -482,6 +482,14 @@ def main():
     parser.add_argument('--list', action='store_true', help="List all symbols in database")
 
     args = parser.parse_args()
+
+    # Convert MM-DD dates to YYYY-MM-DD (prepend "2025-")
+    if args.start:
+        if len(args.start) == 5 and args.start[2] == '-':
+            args.start = "2025-" + args.start
+    if args.end:
+        if len(args.end) == 5 and args.end[2] == '-':
+            args.end = "2025-" + args.end
 
     # Initialize database
     db = MarketDataDB(args.outdir)

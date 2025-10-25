@@ -1,0 +1,41 @@
+{
+  "description": "Single 2-Bar Horizon EWRLS Configuration",
+  "last_updated": "2025-10-24",
+  "optimization_date": "2025-10-24",
+  "test_performance": {
+    "avg_mrd": null,
+    "test_dates": [],
+    "warmup_mode": "50_bars"
+  },
+  "parameters": {
+    "max_positions": 2,
+    "lambda_2bar": 0.99,
+    "min_prediction_for_entry": 0.0031,
+    "min_prediction_increase_on_trade": 0.00097,
+    "min_prediction_decrease_on_no_trade": 0.00031,
+    "min_bars_to_learn": 0,
+    "bars_per_day": 391,
+    "initial_capital": 100000.0,
+    "lookback_window": 90,
+    "win_multiplier": 1.6,
+    "loss_multiplier": 1.0,
+    "rotation_strength_delta": 0.021,
+    "min_rank_strength": 0.0035,
+    "min_bars_to_hold": 6,
+    "profit_target_pct": 0.01,
+    "stop_loss_pct": 0.0075,
+    "increase_on_trade": 0.0018000000000000002,
+    "decrease_on_no_trade": 0.0004,
+    "position_sizing": {
+      "comment": "Kelly Criterion-based position sizing parameters",
+      "expected_win_pct": 0.02,
+      "expected_loss_pct": 0.015,
+      "fractional_kelly": 0.25,
+      "min_position_pct": 0.05,
+      "max_position_pct": 0.25,
+      "enable_volatility_adjustment": true,
+      "volatility_lookback": 20,
+      "max_volatility_reduce": 0.5
+    }
+  }
+}

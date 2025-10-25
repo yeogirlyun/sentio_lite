@@ -500,7 +500,11 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
             continue;
         }
 
-        const auto& pred_data = predictions.at(symbol);
+        auto pd_it = predictions.find(symbol);
+        if (pd_it == predictions.end()) {
+            continue;
+        }
+        const auto& pred_data = pd_it->second;
         double size = calculate_position_size(symbol, pred_data);
 
         // Make sure we have enough cash
@@ -565,7 +569,11 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
             }
 
             // Skip if doesn't pass filters (same as entry check)
-            const auto& pred_data = predictions.at(candidate_symbol);
+            auto cand_it = predictions.find(candidate_symbol);
+            if (cand_it == predictions.end()) {
+                continue;
+            }
+            const auto& pred_data = cand_it->second;
             double probability = prediction_to_probability(pred_data.prediction.pred_2bar.prediction);
             bool is_long = pred_data.prediction.pred_2bar.prediction > 0;
             auto bar_it = market_data.find(candidate_symbol);
@@ -593,7 +601,11 @@ void MultiSymbolTrader::make_trades(const std::unordered_map<Symbol, PredictionD
             }
 
             // Get weakest strength and prediction
-            double weakest_pred = predictions.at(weakest).prediction.pred_2bar.prediction;
+            auto wk_it = predictions.find(weakest);
+            if (wk_it == predictions.end()) {
+                break;
+            }
+            double weakest_pred = wk_it->second.prediction.pred_2bar.prediction;
             double weakest_strength = std::abs(weakest_pred);
 
             // CRITICAL: Only rotate if signals have SAME direction
@@ -788,22 +800,20 @@ void MultiSymbolTrader::update_positions(
 }
 
 double MultiSymbolTrader::calculate_position_size(const Symbol& symbol, const PredictionData& pred_data) {
-    // KELLY CRITERION-BASED POSITION SIZING (adapted from online_trader)
-    // Formula: f* = (p*b - q) / b
-    // where: p = win probability, q = 1-p, b = win/loss ratio
+    // IMPROVED KELLY CRITERION-BASED POSITION SIZING
+    // Now with: configurable parameters, volatility adjustment, and SIGOR-aware sizing
 
     // STEP 1: Extract signal quality metrics
-    double confidence = pred_data.prediction.pred_2bar.confidence;  // Use 5-bar confidence
+    double confidence = pred_data.prediction.pred_2bar.confidence;
     double signal_strength = std::abs(pred_data.prediction.pred_2bar.prediction);
 
-    // STEP 2: Calculate Kelly Criterion position size
-    // Use confidence as win probability
+    // STEP 2: Calculate Kelly Criterion position size with configurable parameters
     double win_probability = std::max(0.51, std::min(0.95, confidence));  // Clamp to [51%, 95%]
 
-    // Expected win/loss based on historical performance (can be calibrated)
-    double expected_win_pct = 0.02;   // 2% average win
-    double expected_loss_pct = 0.015; // 1.5% average loss
-    double win_loss_ratio = expected_win_pct / expected_loss_pct;  // b = 1.33
+    // Use configured expected returns (calibrated from backtest data)
+    double expected_win_pct = config_.position_sizing.expected_win_pct;
+    double expected_loss_pct = config_.position_sizing.expected_loss_pct;
+    double win_loss_ratio = expected_win_pct / expected_loss_pct;
 
     // Kelly formula: f* = (p*b - q) / b
     double p = win_probability;
@@ -811,9 +821,8 @@ double MultiSymbolTrader::calculate_position_size(const Symbol& symbol, const Pr
     double kelly_fraction = (p * win_loss_ratio - q) / win_loss_ratio;
     kelly_fraction = std::max(0.0, std::min(1.0, kelly_fraction));  // Clamp to [0, 1]
 
-    // STEP 3: Apply fractional Kelly for safety (25% of full Kelly)
-    double fractional_kelly = 0.25;  // Conservative: use 25% of full Kelly
-    double base_kelly_size = kelly_fraction * fractional_kelly;
+    // STEP 3: Apply configurable fractional Kelly for safety
+    double base_kelly_size = kelly_fraction * config_.position_sizing.fractional_kelly;
 
     // STEP 4: Adjust for signal strength
     // Normalize signal strength to [0, 1] range (assuming 0.5% is strong)
@@ -823,18 +832,51 @@ double MultiSymbolTrader::calculate_position_size(const Symbol& symbol, const Pr
     // STEP 5: Calculate recommended position size as % of capital
     double recommended_pct = base_kelly_size * strength_adjustment;
 
-    // STEP 6: Apply position size limits
-    recommended_pct = std::max(0.05, recommended_pct);  // Min 5% per position
-    recommended_pct = std::min(0.25, recommended_pct);  // Max 25% per position
+    // STEP 6: VOLATILITY ADJUSTMENT (NEW!)
+    // Reduce position size for high-volatility symbols
+    if (config_.position_sizing.enable_volatility_adjustment) {
+        auto& price_hist = price_history_[symbol];
+        if (static_cast<int>(price_hist.size()) >= config_.position_sizing.volatility_lookback) {
+            // Calculate volatility (standard deviation of returns)
+            int lookback = config_.position_sizing.volatility_lookback;
+            std::vector<double> returns;
+            for (int i = price_hist.size() - lookback; i < static_cast<int>(price_hist.size()) - 1; ++i) {
+                double ret = (price_hist[i+1] - price_hist[i]) / price_hist[i];
+                returns.push_back(ret);
+            }
 
-    // STEP 7: Calculate capital allocation
-    size_t active_positions = positions_.size();
+            // Calculate standard deviation
+            double mean_return = std::accumulate(returns.begin(), returns.end(), 0.0) / returns.size();
+            double variance = 0.0;
+            for (double ret : returns) {
+                variance += (ret - mean_return) * (ret - mean_return);
+            }
+            double std_dev = std::sqrt(variance / returns.size());
 
-    // Available capital: use 95% of cash to leave some buffer
-    double available_capital = cash_ * 0.95;
+            // Convert to daily volatility (annualized vol / sqrt(252))
+            double daily_vol = std_dev;
+
+            // Reduce size for high volatility
+            // 2% vol = no adjustment, 4% vol = 50% reduction (max)
+            double vol_factor = 1.0;
+            if (daily_vol > 0.02) {  // Above 2% daily vol
+                double excess_vol = daily_vol - 0.02;
+                vol_factor = 1.0 - std::min(config_.position_sizing.max_volatility_reduce,
+                                            excess_vol / 0.02);  // Linear reduction
+            }
+            recommended_pct *= vol_factor;
+        }
+    }
+
+    // STEP 7: Apply configurable position size limits
+    recommended_pct = std::max(config_.position_sizing.min_position_pct, recommended_pct);
+    recommended_pct = std::min(config_.position_sizing.max_position_pct, recommended_pct);
+
+    // STEP 8: Calculate capital allocation
+    double available_capital = cash_ * 0.95;  // Use 95% of cash
     double position_capital = available_capital * recommended_pct;
 
-    // STEP 8: Adaptive sizing based on recent trade history
+    // STEP 9: Adaptive sizing based on recent trade history
     auto& history = *trade_history_[symbol];
     if (history.size() >= config_.trade_history_size) {
         bool all_wins = true;
@@ -852,7 +894,7 @@ double MultiSymbolTrader::calculate_position_size(const Symbol& symbol, const Pr
         }
     }
 
-    // STEP 9: Final safety check - don't exceed available cash
+    // STEP 10: Final safety check - don't exceed available cash
     position_capital = std::min(position_capital, available_capital);
 
     return position_capital;

@@ -69,9 +69,9 @@ struct Config {
 void print_usage(const char* program_name) {
     std::cout << "Sentio Lite - SIGOR Intraday Trading\n\n"
               << "Philosophy: Rule-based intraday ensemble with live/replay support\n\n"
-              << "Usage: " << program_name << " mock --date YYYY-MM-DD [options]\n\n"
+              << "Usage: " << program_name << " mock --date MM-DD [options]\n\n"
               << "Required Options:\n"
-              << "  --date YYYY-MM-DD    Test date (single day)\n\n"
+              << "  --date MM-DD         Test date (year is fixed to 2025)\n\n"
               << "Common Options:\n"
               << "  (SIGOR-only build)\n"
               << "  --warmup-bars N      Warmup bars (default: 100, from previous day)\n"
@@ -94,10 +94,10 @@ void print_usage(const char* program_name) {
               << "  --help               Show this help message\n\n"
               << "Examples:\n\n"
               << "  # Test on specific date with default 20-day simulation\n"
-              << "  " << program_name << " mock --date 2025-10-21\n\n"
+              << "  " << program_name << " mock --date 10-21\n\n"
               << "\n"
               << "  # Test without dashboard\n"
-              << "  " << program_name << " mock --date 2025-10-21 --no-dashboard\n\n"
+              << "  " << program_name << " mock --date 10-21 --no-dashboard\n\n"
               << "  # Optimize parameters with Optuna (5-day validation)\n"
               << "  python3 tools/optuna_5day_search.py --end-date 2025-10-23 --trials 200\n\n"
               << "Symbol Configuration:\n"
@@ -159,8 +159,15 @@ bool parse_args(int argc, char* argv[], Config& config) {
             }
         }
         // Date option (mock mode) - SINGLE DAY ONLY
+        // Accept MM-DD format and automatically prepend "2025-"
         else if (arg == "--date" && i + 1 < argc) {
-            config.test_date = argv[++i];
+            std::string date_input = argv[++i];
+            // If input is MM-DD format (5 chars), prepend "2025-"
+            if (date_input.length() == 5 && date_input[2] == '-') {
+                config.test_date = "2025-" + date_input;
+            } else {
+                config.test_date = date_input;  // Accept full format for backwards compatibility
+            }
         }
         // Simulation period removed (SIGOR-only)
         // Warmup period (bars before test day)
@@ -1356,11 +1363,29 @@ int main(int argc, char* argv[]) {
     // 2. For MOCK mode, require --date (SINGLE DAY ONLY)
     if (config.mode == TradingMode::MOCK) {
         if (config.test_date.empty()) {
-            std::cerr << "❌ ERROR: Mock mode requires --date YYYY-MM-DD\n";
+            std::cerr << "❌ ERROR: Mock mode requires --date MM-DD\n";
             std::cerr << "\nExample:\n";
-            std::cerr << "  " << argv[0] << " mock --date 2025-10-21\n";
-            std::cerr << "  " << argv[0] << " mock --date 2025-10-21 --warmup-days 2\n";
+            std::cerr << "  " << argv[0] << " mock --date 10-21\n";
+            std::cerr << "  " << argv[0] << " mock --date 10-22 --warmup-days 2\n";
             return 1;
+        }
+
+        // 2a. SANITY CHECK: Only allow 2025 dates (reject 2024 and earlier)
+        if (config.test_date.length() >= 4) {
+            std::string year_str = config.test_date.substr(0, 4);
+            try {
+                int year = std::stoi(year_str);
+                if (year < 2025) {
+                    std::cerr << "❌ ERROR: Date must be in 2025 or later. You provided: " << config.test_date << "\n";
+                    std::cerr << "  This system only runs on 2025 data.\n";
+                    std::cerr << "  Old dates (2024 and earlier) are not supported.\n";
+                    return 1;
+                }
+            } catch (...) {
+                std::cerr << "❌ ERROR: Invalid date format: " << config.test_date << "\n";
+                std::cerr << "  Expected format: YYYY-MM-DD (e.g., 2025-10-21)\n";
+                return 1;
+            }
         }
     }
 

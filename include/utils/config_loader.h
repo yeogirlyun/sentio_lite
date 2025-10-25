@@ -111,6 +111,43 @@ public:
             config.stop_loss_pct = parse_double_value(content, "stop_loss_pct");
         }
 
+        // Position Sizing Configuration (Kelly Criterion with volatility adjustment)
+        if (content.find("\"position_sizing\":") != std::string::npos) {
+            // Find position_sizing section
+            size_t ps_start = content.find("\"position_sizing\":");
+            if (ps_start != std::string::npos) {
+                std::string ps_section = content.substr(ps_start);
+
+                // Parse position sizing parameters if they exist
+                if (ps_section.find("\"expected_win_pct\":") != std::string::npos) {
+                    config.position_sizing.expected_win_pct = parse_double_value(ps_section, "expected_win_pct");
+                }
+                if (ps_section.find("\"expected_loss_pct\":") != std::string::npos) {
+                    config.position_sizing.expected_loss_pct = parse_double_value(ps_section, "expected_loss_pct");
+                }
+                if (ps_section.find("\"fractional_kelly\":") != std::string::npos) {
+                    config.position_sizing.fractional_kelly = parse_double_value(ps_section, "fractional_kelly");
+                }
+                if (ps_section.find("\"min_position_pct\":") != std::string::npos) {
+                    config.position_sizing.min_position_pct = parse_double_value(ps_section, "min_position_pct");
+                }
+                if (ps_section.find("\"max_position_pct\":") != std::string::npos) {
+                    config.position_sizing.max_position_pct = parse_double_value(ps_section, "max_position_pct");
+                }
+                if (ps_section.find("\"volatility_lookback\":") != std::string::npos) {
+                    config.position_sizing.volatility_lookback = parse_int_value(ps_section, "volatility_lookback");
+                }
+                if (ps_section.find("\"max_volatility_reduce\":") != std::string::npos) {
+                    config.position_sizing.max_volatility_reduce = parse_double_value(ps_section, "max_volatility_reduce");
+                }
+                if (ps_section.find("\"enable_volatility_adjustment\": true") != std::string::npos) {
+                    config.position_sizing.enable_volatility_adjustment = true;
+                } else if (ps_section.find("\"enable_volatility_adjustment\": false") != std::string::npos) {
+                    config.position_sizing.enable_volatility_adjustment = false;
+                }
+            }
+        }
+
         // Validate: fail fast on unsupported/deprecated parameters
         validate_no_deprecated_params(content);
 
