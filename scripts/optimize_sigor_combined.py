@@ -336,7 +336,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Optimize SIGOR weights + windows with Optuna (eval/validation constrained)")
     parser.add_argument("--end-date", required=True, help="End date MM-DD (inclusive, year fixed to 2025)")
-    parser.add_argument("--data", default="data/equities/SPY_RTH_NH.csv", help="Path to SPY_RTH_NH.csv")
+    parser.add_argument("--data", default="data/equities/TQQQ_RTH_NH.csv", help="Path to TQQQ_RTH_NH.csv")
     parser.add_argument("--trials", type=int, default=200, help="Number of Optuna trials (default: 200)")
     parser.add_argument("--overfitting-threshold", type=float, default=0.20,
                       help="Max allowed degradation from evaluation to validation (default: 0.20)")
