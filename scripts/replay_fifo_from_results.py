@@ -60,7 +60,15 @@ def main():
 
     if not os.path.exists(args.fifo):
         os.mkfifo(args.fifo)
-    fifo = open(args.fifo, 'w')
+
+    def open_fifo_writer(path: str):
+        while True:
+            try:
+                return open(path, 'w')
+            except Exception:
+                time.sleep(0.5)
+
+    fifo = open_fifo_writer(args.fifo)
 
     # Emit bars in order
     for minute in timeline:
@@ -83,8 +91,27 @@ def main():
                 'close': float(found['close']),
                 'volume': int(found['volume'])
             }
-            fifo.write(json.dumps(payload) + '\n')
-            fifo.flush()
+            line = json.dumps(payload) + '\n'
+            while True:
+                try:
+                    fifo.write(line)
+                    fifo.flush()
+                    break
+                except BrokenPipeError:
+                    try:
+                        fifo.close()
+                    except Exception:
+                        pass
+                    # Reader gone; wait for new reader and retry same line
+                    fifo = open_fifo_writer(args.fifo)
+                except Exception:
+                    # Conservative: reopen and retry
+                    try:
+                        fifo.close()
+                    except Exception:
+                        pass
+                    time.sleep(0.2)
+                    fifo = open_fifo_writer(args.fifo)
         time.sleep(max(0, args.speed_ms) / 1000.0)
 
     fifo.close()
