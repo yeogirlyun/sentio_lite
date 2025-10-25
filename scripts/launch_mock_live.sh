@@ -9,12 +9,14 @@ FIFO=/tmp/alpaca_bars.fifo
 RESULTS=""
 DATE=""
 SPEED_MS=${SPEED_MS:-60}
+EMAIL_TO="${EMAIL_TO:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --results) RESULTS="$2"; shift 2 ;;
     --date) DATE="$2"; shift 2 ;;
     --speed-ms) SPEED_MS="$2"; shift 2 ;;
+    --email-to) EMAIL_TO="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
@@ -41,14 +43,19 @@ echo "Replay bridge PID: $BRIDGE_PID"
 # Start live trader (consumes FIFO exactly like real live)
 ./build/sentio_lite mock-live --date "${DATE:-2000-01-01}" || true
 
-# Build dashboard from exported results
+# Build dashboard from exported results and optionally email it
 if [[ -f results.json ]]; then
+  out="logs/dashboard/mocklive_$(date +%Y%m%d_%H%M%S).html"
   python3 scripts/rotation_trading_dashboard_html.py \
     --trades trades.jsonl \
-    --output logs/dashboard/mocklive_$(date +%Y%m%d_%H%M%S).html \
+    --output "$out" \
     --data-dir data \
     --results results.json \
     --start-equity 100000
+
+  if [[ -n "$EMAIL_TO" ]]; then
+    python3 scripts/send_dashboard_email.py --html "$out" --to "$EMAIL_TO" || true
+  fi
 fi
 
 
